@@ -45,18 +45,12 @@ where
     /// Send a transaction to the mempool.
     async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {
         // Acquire a key from the key store
-        let public_address = self
+        let (public_address, private_key) = self
             .key_store
             .acquire_key()
             .await
             .expect("Failed to acquire key");
         info!("Acquired key: {}", public_address);
-        // Get the private key for the acquired public address
-        let private_key = self
-            .key_store
-            .get_private_key(&public_address)
-            .await
-            .expect("Key not found");
 
         let chain_id = u64::from_str_radix(
             &action
@@ -69,6 +63,7 @@ where
         .expect("Failed to parse chain ID");
 
         let wallet: LocalWallet = private_key
+            .as_str()
             .parse::<LocalWallet>()
             .unwrap()
             .with_chain_id(chain_id);
