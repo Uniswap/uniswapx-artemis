@@ -64,7 +64,8 @@ impl KeyStore {
 
     pub async fn acquire_key(&self) -> Result<(String, PrivateKey), KeyStoreError> {
         loop {
-            let mut keys: tokio::sync::MutexGuard<'_, HashMap<String, (PrivateKey, bool)>> = self.keys.lock().await;
+            let mut keys: tokio::sync::MutexGuard<'_, HashMap<String, (PrivateKey, bool)>> =
+                self.keys.lock().await;
             if let Some((public_address, (private_key, in_use))) =
                 keys.iter_mut().find(|(_, (_, in_use))| !*in_use)
             {
@@ -116,7 +117,9 @@ mod tests {
 
         // Test for valid key retrieval
         let (public_key, private_key) = keystore.acquire_key().await.unwrap();
-        if private_key != PrivateKey::new("private_key1".to_string()) || private_key.as_str() != "private_key1" {
+        if private_key != PrivateKey::new("private_key1".to_string())
+            || private_key.as_str() != "private_key1"
+        {
             panic!("Private key not found");
         }
 
@@ -156,7 +159,9 @@ mod tests {
         };
 
         // Attempt to release a key that is not in the store
-        let result = keystore.release_key("nonexistent_address".to_string()).await;
+        let result = keystore
+            .release_key("nonexistent_address".to_string())
+            .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), KeyStoreError::KeyNotFound);
     }

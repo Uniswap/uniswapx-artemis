@@ -103,14 +103,15 @@ where
 
         action.execution.tx.set_gas(gas_usage_result);
 
+        let sender_client = self.sender_client.clone();
+        let nonce_manager = sender_client.nonce_manager(address);
+        let signer = nonce_manager.with_signer(wallet);
+
         info!("Executing tx {:?}", action.execution.tx);
-        self.sender_client
-            .clone()
-            .nonce_manager(address)
-            .with_signer(wallet)
+        let result = signer
             .send_transaction(action.execution.tx, None)
             .await
-            .map_err(|err| anyhow::anyhow!("Error sending transaction: {}", err))?;
+            .map_err(|err| anyhow::anyhow!("Error sending transaction: {}", err));
 
         match self.key_store.release_key(public_address.clone()).await {
             Ok(_) => {
@@ -120,6 +121,8 @@ where
                 info!("Failed to release key: {}", e);
             }
         }
+        // Send result up the stack
+        result?;
         Ok(())
     }
 }
