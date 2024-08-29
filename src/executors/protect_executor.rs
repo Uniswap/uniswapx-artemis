@@ -9,7 +9,10 @@ use artemis_core::executors::mempool_executor::SubmitTxToMempool;
 use artemis_core::types::Executor;
 use async_trait::async_trait;
 use ethers::{
-    middleware::MiddlewareBuilder, providers::Middleware, signers::{LocalWallet, Signer}, types::U256,
+    middleware::MiddlewareBuilder,
+    providers::Middleware,
+    signers::{LocalWallet, Signer},
+    types::U256,
 };
 
 use crate::strategies::keystore::KeyStore;
