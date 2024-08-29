@@ -111,6 +111,15 @@ where
             .send_transaction(action.execution.tx, None)
             .await
             .map_err(|err| anyhow::anyhow!("Error sending transaction: {}", err))?;
+
+        match self.key_store.release_key(public_address.clone()).await {
+            Ok(_) => {
+                info!("Released key: {}", public_address);
+            }
+            Err(e) => {
+                info!("Failed to release key: {}", e);
+            }
+        }
         Ok(())
     }
 }

@@ -64,7 +64,7 @@ impl KeyStore {
 
     pub async fn acquire_key(&self) -> Result<(String, PrivateKey), KeyStoreError> {
         loop {
-            let mut keys = self.keys.lock().await;
+            let mut keys: tokio::sync::MutexGuard<'_, HashMap<String, (PrivateKey, bool)>> = self.keys.lock().await;
             if let Some((public_address, (private_key, in_use))) =
                 keys.iter_mut().find(|(_, (_, in_use))| !*in_use)
             {
@@ -72,6 +72,7 @@ impl KeyStore {
                 return Ok((public_address.clone(), private_key.clone()));
             }
             drop(keys); // Release the lock before waiting
+            println!("Waiting for key");
             self.notify.notified().await;
         }
     }
