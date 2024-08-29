@@ -8,19 +8,25 @@ use anyhow::Result;
 use artemis_core::executors::mempool_executor::SubmitTxToMempool;
 use artemis_core::types::Executor;
 use async_trait::async_trait;
-use ethers::{providers::Middleware, types::U256};
+use ethers::{
+    middleware::MiddlewareBuilder, providers::Middleware, signers::{LocalWallet, Signer}, types::U256,
+};
+
+use crate::strategies::keystore::KeyStore;
 
 /// An executor that sends transactions to the mempool.
 pub struct ProtectExecutor<M, N> {
     client: Arc<M>,
     sender_client: Arc<N>,
+    key_store: Arc<KeyStore>,
 }
 
 impl<M: Middleware, N: Middleware> ProtectExecutor<M, N> {
-    pub fn new(client: Arc<M>, sender_client: Arc<N>) -> Self {
+    pub fn new(client: Arc<M>, sender_client: Arc<N>, key_store: Arc<KeyStore>) -> Self {
         Self {
             client,
             sender_client,
+            key_store,
         }
     }
 }
@@ -30,11 +36,41 @@ impl<M, N> Executor<SubmitTxToMempool> for ProtectExecutor<M, N>
 where
     M: Middleware,
     M::Error: 'static,
-    N: Middleware,
+    N: Middleware + 'static,
     N::Error: 'static,
 {
     /// Send a transaction to the mempool.
     async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {
+        // Acquire a key from the key store
+        let public_address = self
+            .key_store
+            .acquire_key()
+            .await
+            .expect("Failed to acquire key");
+        info!("Acquired key: {}", public_address);
+        // Get the private key for the acquired public address
+        let private_key = self
+            .key_store
+            .get_private_key(&public_address)
+            .await
+            .expect("Key not found");
+
+        let chain_id = u64::from_str_radix(
+            &action
+                .tx
+                .chain_id()
+                .expect("Chain ID not found on transaction")
+                .to_string(),
+            10,
+        )
+        .expect("Failed to parse chain ID");
+
+        let wallet: LocalWallet = private_key
+            .parse::<LocalWallet>()
+            .unwrap()
+            .with_chain_id(chain_id);
+        let address = wallet.address();
+
         let gas_usage_result = self
             .client
             .estimate_gas(&action.tx, None)
@@ -65,6 +101,9 @@ where
 
         info!("Executing tx {:?}", action.tx);
         self.sender_client
+            .clone()
+            .nonce_manager(address)
+            .with_signer(wallet)
             .send_transaction(action.tx, None)
             .await
             .map_err(|err| anyhow::anyhow!("Error sending transaction: {}", err))?;
