@@ -46,6 +46,7 @@ where
     async fn execute(&self, mut action: SubmitTxToMempoolWithExecutionMetadata) -> Result<()> {
         let order_hash = action.metadata.order_hash.clone();
         // Acquire a key from the key store
+        info!("{} - Attempting to acquire a key", order_hash);
         let (public_address, private_key) = self
             .key_store
             .acquire_key()

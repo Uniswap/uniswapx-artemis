@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
+use tracing::info;
 
 use std::fmt;
 
@@ -71,9 +72,11 @@ impl KeyStore {
                 let (private_key, in_use) = &mut *key_data;
                 if !*in_use {
                     *in_use = true;
+                    info!("Acquired key: {}", public_address);
                     return Ok((public_address.clone(), private_key.clone()));
                 }
             }
+            info!("No keys available, waiting for notification");
             self.notify.notified().await;
         }
     }
@@ -158,8 +161,12 @@ mod tests {
     #[tokio::test]
     async fn test_notify_on_key_release() {
         let mut keystore = KeyStore::new();
-        keystore.add_key("address1".to_string(), "private_key1".to_string()).await;
-        keystore.add_key("address2".to_string(), "private_key2".to_string()).await;
+        keystore
+            .add_key("address1".to_string(), "private_key1".to_string())
+            .await;
+        keystore
+            .add_key("address2".to_string(), "private_key2".to_string())
+            .await;
 
         // Acquire both keys
         let (addr1, _) = keystore.acquire_key().await.unwrap();
@@ -168,9 +175,7 @@ mod tests {
         // Attempt to acquire a key (should wait)
         let acquire_future = tokio::spawn({
             let keystore = keystore.clone();
-            async move {
-                keystore.acquire_key().await
-            }
+            async move { keystore.acquire_key().await }
         });
 
         // Wait a bit to ensure the acquire_future is waiting
@@ -182,9 +187,12 @@ mod tests {
         // The acquire_future should now complete
         let acquire_result = timeout(Duration::from_secs(1), acquire_future).await;
         assert!(acquire_result.is_ok(), "Acquire operation timed out");
-        
+
         let (acquired_addr, _) = acquire_result.unwrap().unwrap().unwrap();
-        assert_eq!(acquired_addr, addr1, "Acquired address should match released address");
+        assert_eq!(
+            acquired_addr, addr1,
+            "Acquired address should match released address"
+        );
 
         // Clean up
         keystore.release_key(addr2).await.unwrap();

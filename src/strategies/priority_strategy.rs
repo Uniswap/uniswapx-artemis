@@ -181,7 +181,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             .iter()
             .any(|o: &OrderData| self.done_orders.contains_key(&o.hash))
         {
-            info!("Skipping route with done orders");
+            info!(
+                "{} - Skipping route with done order",
+                event.request.orders[0].hash
+            );
             return None;
         }
 
@@ -192,9 +195,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             ..
         } = &event.request;
 
-        if let Some(profit) = self.get_execution_metadata(&event) {
+        if let Some(metadata) = self.get_execution_metadata(&event) {
             info!(
-                "Sending trade: num trades: {} routed quote: {}, batch needs: {}",
+                "{} - Sending trade: num trades: {} routed quote: {}, batch needs: {}",
+                metadata.order_hash,
                 orders.len(),
                 event.route.quote,
                 amount_out_required,
@@ -219,7 +223,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                             total_profit: U256::from(0),
                         }),
                     },
-                    metadata: profit,
+                    metadata,
                 },
             ));
         }
@@ -367,7 +371,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 }
                 if self.open_orders().contains_key(order_hash) {
                     let existing_order = self.open_orders_mut().get_mut(order_hash).unwrap();
-                    info!("{} - Updating order", order_hash);
+                    // info!("{} - Updating order", order_hash);
                     existing_order.resolved = resolved_order;
                 } else {
                     info!("{} - Adding new order", order_hash);
