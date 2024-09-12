@@ -84,7 +84,8 @@ impl KeyStore {
     pub async fn release_key(&self, public_address: String) -> Result<(), KeyStoreError> {
         if let Some(key_mutex) = self.keys.get(&public_address) {
             let mut key_data = key_mutex.lock().await;
-            key_data.1 = false;
+            let (_, in_use) = &mut *key_data;
+            *in_use = false;
             self.notify.notify_one();
             Ok(())
         } else {
