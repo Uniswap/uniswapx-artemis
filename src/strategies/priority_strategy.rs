@@ -447,8 +447,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
     fn mark_as_done(&mut self, order_hash: &str) {
         self.remove_open_order(order_hash);
         if !self.done_orders.contains_key(order_hash) {
-            self.done_orders
-                .insert(order_hash.to_string(), self.last_block_timestamp + DONE_EXPIRY);
+            self.done_orders.insert(
+                order_hash.to_string(),
+                self.last_block_timestamp + DONE_EXPIRY,
+            );
         }
     }
 }

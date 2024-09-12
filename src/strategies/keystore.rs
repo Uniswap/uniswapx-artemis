@@ -72,7 +72,6 @@ impl KeyStore {
                 let (private_key, in_use) = &mut *key_data;
                 if !*in_use {
                     *in_use = true;
-                    info!("Acquired key: {}", public_address);
                     return Ok((public_address.clone(), private_key.clone()));
                 }
             }
