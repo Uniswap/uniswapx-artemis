@@ -105,8 +105,13 @@ where
             Ok(gas) => gas,
             Err(e) => {
                 // Release the key before returning
-                if let Err(release_err) = self.key_store.release_key(public_address.clone()).await {
-                    warn!("{} - Failed to release key: {}", order_hash, release_err);
+                match self.key_store.release_key(public_address.clone()).await {
+                    Ok(_) => {
+                        info!("{} - Released key: {}", order_hash, public_address);
+                    }
+                    Err(release_err) => {
+                        warn!("{} - Failed to release key: {}", order_hash, release_err);
+                    }
                 }
                 return Err(e);
             }

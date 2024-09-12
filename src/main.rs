@@ -13,7 +13,7 @@ use ethers::{
     signers::{LocalWallet, Signer},
 };
 use executors::protect_executor::ProtectExecutor;
-use executors::public_1559_executor::Public1559Executor;
+use executors::queued_executor::QueuedExecutor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
@@ -212,24 +212,18 @@ async fn main() -> Result<()> {
         _ => None,
     });
 
-    let key_count = key_store.len();
+    let queued_executor = Box::new(QueuedExecutor::new(
+        provider.clone(),
+        provider.clone(),
+        key_store.clone(),
+    ));
 
-    for _ in 0..key_count {
-        let public_tx_executor = Box::new(Public1559Executor::new(
-            provider.clone(),
-            provider.clone(),
-            key_store.clone(),
-        ));
+    let queued_executor = ExecutorMap::new(queued_executor, |action| match action {
+        Action::SubmitPublicTx(tx) => Some(tx),
+        _ => None,
+    });
 
-        let public_tx_executor = ExecutorMap::new(public_tx_executor, |action| match action {
-            Action::SubmitPublicTx(execution) => Some(execution),
-            // No op for protected transactions
-            _ => None,
-        });
-
-        engine.add_executor(Box::new(public_tx_executor));
-    }
-
+    engine.add_executor(Box::new(queued_executor));
     engine.add_executor(Box::new(protect_executor));
 
     // Start engine.
