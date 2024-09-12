@@ -206,26 +206,32 @@ async fn main() -> Result<()> {
         key_store.clone(),
     ));
 
-    let public_tx_executor = Box::new(Public1559Executor::new(
-        provider.clone(),
-        provider.clone(),
-        key_store.clone(), // TODO: this should be the same as the protect executor
-    ));
-
     let protect_executor = ExecutorMap::new(protect_executor, |action| match action {
         Action::SubmitTx(tx) => Some(tx),
         // No op for public transactions
         _ => None,
     });
 
-    let public_tx_executor = ExecutorMap::new(public_tx_executor, |action| match action {
-        Action::SubmitPublicTx(execution) => Some(execution),
-        // No op for protected transactions
-        _ => None,
-    });
+    let key_count = key_store.len();
+
+    for _ in 0..key_count {
+        let public_tx_executor = Box::new(Public1559Executor::new(
+            provider.clone(),
+            provider.clone(),
+            key_store.clone(),
+        ));
+
+        let public_tx_executor = ExecutorMap::new(public_tx_executor, |action| match action {
+            Action::SubmitPublicTx(execution) => Some(execution),
+            // No op for protected transactions
+            _ => None,
+        });
+
+        engine.add_executor(Box::new(public_tx_executor));
+    }
 
     engine.add_executor(Box::new(protect_executor));
-    engine.add_executor(Box::new(public_tx_executor));
+
     // Start engine.
     match engine.run().await {
         Ok(mut set) => {
