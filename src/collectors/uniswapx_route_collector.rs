@@ -188,7 +188,7 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                     }
                 }
 
-                // If nzo messages were received, wait for one
+                // If no messages were received, wait for one
                 if all_requests.is_empty() {
                     if let Some(requests) = receiver.recv().await {
                         for request in requests {
