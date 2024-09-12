@@ -305,10 +305,8 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         let logs = self.client.get_logs(&filter).await?;
         for log in logs {
             let order_hash = format!("0x{:x}", log.topics[1]);
-            // remove from open
             info!("{} - Removing filled order", order_hash);
             self.remove_open_order(&order_hash);
-            // add to done
             self.done_orders.insert(
                 order_hash.to_string(),
                 self.current_timestamp()? + DONE_EXPIRY,

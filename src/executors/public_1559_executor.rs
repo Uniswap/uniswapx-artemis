@@ -73,26 +73,46 @@ where
 
         action.execution.tx.set_from(address);
 
-        // redundant match to log specific reasons
+        // early return on OrderAlready filled
         // always use 1_000_000 gas for now
-        let gas_usage_result = self
+        let gas_usage_result: Result<U256, anyhow::Error> = self
             .client
             .estimate_gas(&action.execution.tx, None)
             .await
-            .unwrap_or_else(|err| {
+            .or_else(|err| {
                 if let Some(Value::String(four_byte)) =
                     err.as_error_response().unwrap().data.clone()
                 {
-                    warn!(
-                        "Error estimating gas with reason: {}; {}",
-                        Into::<ReactorErrorCode>::into(four_byte.clone()),
-                        four_byte
-                    );
+                    let error_code = ReactorErrorCode::from(four_byte.clone());
+                    match error_code {
+                        ReactorErrorCode::OrderAlreadyFilled => {
+                            info!("{} - Order already filled, skipping execution", order_hash);
+                            Err(anyhow::anyhow!("Order Already Filled"))
+                        }
+                        ReactorErrorCode::InvalidDeadline => {
+                            info!("{} - Order past deadline, skipping execution", order_hash);
+                            Err(anyhow::anyhow!("Order Past Deadline"))
+                        }
+                        _ => Ok(U256::from(1_000_000)),
+                    }
                 } else {
                     warn!("Error estimating gas: {:?}", err);
+                    Ok(U256::from(1_000_000))
                 }
-                U256::from(1_000_000)
             });
+
+        let gas_usage = match gas_usage_result {
+            Ok(gas) => gas,
+            Err(e) => {
+                // Release the key before returning
+                if let Err(release_err) = self.key_store.release_key(public_address.clone()).await {
+                    warn!("{} - Failed to release key: {}", order_hash, release_err);
+                }
+                return Err(e);
+            }
+        };
+
+        action.execution.tx.set_gas(gas_usage);
 
         let bid_priority_fee;
         let base_fee: U256 = self
@@ -119,7 +139,7 @@ where
             return Err(anyhow::anyhow!("Transaction is not EIP1559"));
         }
 
-        action.execution.tx.set_gas(gas_usage_result);
+        action.execution.tx.set_gas(gas_usage);
 
         let sender_client = self.sender_client.clone();
         let nonce_manager = sender_client.nonce_manager(address);
