@@ -125,7 +125,7 @@ pub enum OrderResolution {
     Resolved(ResolvedOrder),
     Expired,
     Invalid,
-    NotFillableYet
+    NotFillableYet(ResolvedOrder),
 }
 
 impl V2DutchOrder {
@@ -213,7 +213,7 @@ impl PriorityOrder {
             .collect();
 
         if Uint::from(block_number).lt(&self.cosignerData.auctionTargetBlock.saturating_sub(Uint::from(2))) {
-            return OrderResolution::NotFillableYet;
+            return OrderResolution::NotFillableYet(ResolvedOrder { input, outputs });
         };
 
         OrderResolution::Resolved(ResolvedOrder { input, outputs })

@@ -16,13 +16,12 @@ use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
 use bindings_uniswapx::shared_types::SignedOrder;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use ethers::{
     providers::Middleware,
     types::{Address, Bytes, Filter, U256},
     utils::hex,
 };
-use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -87,7 +86,7 @@ pub struct UniswapXPriorityFill<M> {
     // map of open order hashes to order data
     open_orders: Arc<DashMap<String, OrderData>>,
     // map of done order hashes to time at which we can safely prune them
-    done_orders: HashMap<String, u64>,
+    done_orders: Arc<DashMap<String, u64>>,
     batch_sender: Sender<Vec<OrderBatchData>>,
     route_receiver: Receiver<RoutedOrder>,
 }
@@ -108,7 +107,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             last_block_number: 0,
             last_block_timestamp: 0,
             open_orders: Arc::new(DashMap::new()),
-            done_orders: HashMap::new(),
+            done_orders: Arc::new(DashMap::new()),
             batch_sender: sender,
             route_receiver: receiver,
         }
@@ -171,8 +170,11 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
     }
 
     async fn process_order_event(&mut self, event: &UniswapXOrder) -> Option<Action> {
-        if self.last_block_timestamp == 0 || self.open_orders.get(&event.order_hash).is_some() {
-            info!("{} - skipping processing order event", event.order_hash);
+        if self.last_block_timestamp == 0 {
+            info!(
+                "{} - skipping processing order event due to uninitialized timestamp",
+                event.order_hash
+            );
             return None;
         }
 
@@ -181,11 +183,69 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             .map_err(|e| error!("failed to decode: {}", e))
             .ok()?;
 
-        self.update_order_state(order, event.signature.clone(), event.order_hash.clone());
-        self.send_order_if_open(&event.order_hash)
-            .await
-            .map_err(|e| error!("failed to send order: {}", e))
-            .ok()?;
+        let order_hash = event.order_hash.clone();
+        let signature = event.signature.clone();
+        let resolved_order = order.resolve(
+            self.last_block_number,
+            self.last_block_timestamp + BLOCK_TIME,
+            Uint::from(0),
+        );
+
+        let order_status = match resolved_order {
+            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
+            OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
+            OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
+        };
+
+        {
+            match self.open_orders.entry(order_hash.clone()) {
+                Entry::Occupied(_) => {
+                    info!("{} - Order already being processed, skipping", order_hash);
+                    return None;
+                }
+                Entry::Vacant(entry) => {
+                    match order_status {
+                        OrderStatus::Done => {
+                            self.mark_as_done(&order_hash);
+                        }
+                        // not immediately fillable, insert into open_orders
+                        // so that as new blocks come in, we can check again
+                        OrderStatus::NotFillableYet(resolved) => {
+                            info!(
+                                "{} - Adding new order not fillable yet - last block: {}, target: {}",
+                                order_hash,
+                                self.last_block_number,
+                                order.cosignerData.auctionTargetBlock
+                            );
+                            let order_data = OrderData {
+                                order: Order::PriorityOrder(order.clone()),
+                                hash: order_hash.clone(),
+                                signature: signature.clone(),
+                                resolved: resolved.clone(),
+                            };
+                            entry.insert(order_data);
+                        }
+                        // immediately fillable,
+                        // don't insert into open_orders but do send for routing
+                        OrderStatus::Open(resolved) => {
+                            if self.done_orders.contains_key(&order_hash) {
+                                info!("{} - New Order already processed, skipping", order_hash);
+                                return None;
+                            }
+                            let order_data = OrderData {
+                                order: Order::PriorityOrder(order.clone()),
+                                hash: order_hash.clone(),
+                                signature: signature.clone(),
+                                resolved: resolved.clone(),
+                            };
+                            info!("{} - Sending order for routing and execution", order_hash);
+                            let order_batch = self.get_order_batch(&order_data);
+                            self.batch_sender.send(vec![order_batch]).await.ok()?;
+                        }
+                    }
+                }
+            }
+        }
 
         None
     }
@@ -258,7 +318,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             .map_err(|e| error!("Error handling fills {}", e))
             .ok()?;
         self.update_open_orders().await;
-        self.prune_done_orders();
+
+        //if self.last_block_number % 500 == 0 {
+            self.prune_done_orders();
+        //}
 
         None
     }
@@ -345,6 +408,19 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         })
     }
 
+    fn prune_done_orders(&mut self) {
+        info!("Pruning done orders");
+        let mut to_remove = Vec::new();
+        for item in self.done_orders.iter() {
+            if *item.value() < self.last_block_timestamp {
+                to_remove.push(item.key().clone());
+            }
+        }
+        for order_hash in to_remove {
+            self.done_orders.remove(&order_hash);
+        }
+    }
+
     fn update_order_state(&mut self, order: PriorityOrder, signature: String, order_hash: String) {
         let resolved = order.resolve(
             self.last_block_number,
@@ -354,7 +430,9 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
             OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::NotFillableYet => OrderStatus::NotFillableYet,
+            OrderResolution::NotFillableYet(resolved_order) => {
+                OrderStatus::NotFillableYet(resolved_order)
+            }
             OrderResolution::Resolved(resolved_order) => OrderStatus::Open(resolved_order),
         };
 
@@ -362,7 +440,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             OrderStatus::Done => {
                 self.mark_as_done(&order_hash);
             }
-            OrderStatus::NotFillableYet => {
+            OrderStatus::NotFillableYet(_) => {
                 info!(
                     "{} - Order not fillable yet - last block: {}, target: {}",
                     order_hash, self.last_block_number, order.cosignerData.auctionTargetBlock
@@ -380,6 +458,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                         existing_order.resolved = resolved_order;
                     })
                 } else {
+                    // shouldn't really happen
                     info!("{} - Adding new order", order_hash);
                     self.insert_open_order(
                         order_hash.clone(),
@@ -395,19 +474,8 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         }
     }
 
-    fn prune_done_orders(&mut self) {
-        let mut to_remove = Vec::new();
-        for (order_hash, deadline) in self.done_orders.iter() {
-            if *deadline < self.last_block_timestamp {
-                to_remove.push(order_hash.clone());
-            }
-        }
-        for order_hash in to_remove {
-            self.done_orders.remove(&order_hash);
-        }
-    }
-
     async fn update_open_orders(&mut self) {
+        info!("Updating open orders");
         let order_hashes: Vec<String> = self
             .open_orders
             .iter()
@@ -438,12 +506,13 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
     async fn send_order_if_open(&self, order_hash: &str) -> Result<()> {
         if let Some(order_data) = self.get_open_order(order_hash) {
             let order_batch = self.get_order_batch(&order_data);
+            info!("Sending order through batch sender: {}", order_batch.orders[0].hash);
             self.batch_sender.send(vec![order_batch]).await?;
         }
         Ok(())
     }
 
-    fn mark_as_done(&mut self, order_hash: &str) {
+    fn mark_as_done(&self, order_hash: &str) {
         self.remove_open_order(order_hash);
         if !self.done_orders.contains_key(order_hash) {
             self.done_orders.insert(
