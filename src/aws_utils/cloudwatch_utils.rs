@@ -1,5 +1,5 @@
 /// Constants for dimension names and values
-pub const EXECUTOR_DIMENSION: &str = "Executor";
+pub const SERVICE_DIMENSION: &str = "Service";
 pub const PRIORITY_EXECUTOR: &str = "PriorityExecutor";
 pub const V2_EXECUTOR: &str = "V2Executor";
 
@@ -11,12 +11,12 @@ pub const TX_STATUS_UNKNOWN_METRIC: &str = "TransactionStatusUnknown";
 pub const LATEST_BLOCK: &str = "LatestBlock";
 
 pub enum DimensionName {
-    Executor,
+    Service,
 }
 impl AsRef<str> for DimensionName {
     fn as_ref(&self) -> &str {
         match self {
-            DimensionName::Executor => PRIORITY_EXECUTOR,
+            DimensionName::Service => SERVICE_DIMENSION,
         }
     }
 }
@@ -24,7 +24,7 @@ impl AsRef<str> for DimensionName {
 impl From<DimensionName> for String {
     fn from(dimension: DimensionName) -> Self {
         match dimension {
-            DimensionName::Executor => EXECUTOR_DIMENSION.to_string(),
+            DimensionName::Service => SERVICE_DIMENSION.to_string(),
         }
     }
 }
