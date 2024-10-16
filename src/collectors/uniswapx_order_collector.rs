@@ -31,6 +31,7 @@ pub enum OrderType {
     DutchV2,
     #[default]
     Priority,
+    DutchV3,
 }
 
 impl FromStr for OrderType {
@@ -40,6 +41,7 @@ impl FromStr for OrderType {
         match s {
             "Dutch_V2" => Ok(OrderType::DutchV2),
             "Priority" => Ok(OrderType::Priority),
+            "Dutch_V3" => Ok(OrderType::DutchV3),
             _ => Err(OrderTypeError::InvalidOrderType),
         }
     }
@@ -50,6 +52,7 @@ impl fmt::Display for OrderType {
         match self {
             OrderType::DutchV2 => write!(f, "Dutch_V2"),
             OrderType::Priority => write!(f, "Priority"),
+            OrderType::DutchV3 => write!(f, "Dutch_V3"),
         }
     }
 }
@@ -219,4 +222,6 @@ mod tests {
             _ => (),
         }
     }
+
+    // TODO: add test for v3 order decoding
 }

@@ -14,8 +14,22 @@ use std::{
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
+pub enum ReactorAddress {
+    DutchV2,
+    DutchV3,
+}
 
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+impl ReactorAddress {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReactorAddress::DutchV2 => "0x00000011F84B9aa48e5f8aA8B9897600006289Be",
+            ReactorAddress::DutchV3 => "...", // Replace with actual V3 address when available
+        }
+    }
+}
+
+pub const DUTCHV2_REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+pub const DUTCHV3_REACTOR_ADDRESS: &str = "...";
 const SWAPROUTER_02_ADDRESS: &str = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
 pub const WETH_ADDRESS: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 
@@ -27,6 +41,7 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
         client: Arc<M>,
         executor_address: &str,
         signed_orders: Vec<SignedOrder>,
+        reactor_address: ReactorAddress,
         RoutedOrder { request, route }: &RoutedOrder,
     ) -> Result<TypedTransaction> {
         let chain_id: U256 = client.get_chainid().await?;
@@ -46,7 +61,7 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
             .await?;
 
         let reactor_approval = self
-            .get_tokens_to_approve(client.clone(), token_out, executor_address, REACTOR_ADDRESS)
+            .get_tokens_to_approve(client.clone(), token_out, executor_address, reactor_address.as_str())
             .await?;
 
         // Strip off function selector

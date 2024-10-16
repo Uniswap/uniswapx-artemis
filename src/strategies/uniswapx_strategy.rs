@@ -1,12 +1,12 @@
 use super::{
-    shared::{UniswapXStrategy, WETH_ADDRESS},
+    shared::{UniswapXStrategy, WETH_ADDRESS, DUTCHV2_REACTOR_ADDRESS, DUTCHV3_REACTOR_ADDRESS},
     types::{Config, OrderStatus, TokenInTokenOut},
 };
-use crate::collectors::{
+use crate::{collectors::{
     block_collector::NewBlock,
     uniswapx_order_collector::UniswapXOrder,
     uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
-};
+}, strategies::shared::ReactorAddress};
 use alloy_primitives::Uint;
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
@@ -23,14 +23,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::try_join;
 use tracing::{error, info};
-use uniswapx_rs::order::{Order, OrderResolution, V2DutchOrder};
+use uniswapx_rs::order::{Order, OrderResolution, V2DutchOrder, V3DutchOrder};
 
 use super::types::{Action, Event};
 
 const BLOCK_TIME: u64 = 12;
 const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -96,7 +96,7 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXUniswapFill<M>
 impl<M: Middleware + 'static> UniswapXStrategy<M> for UniswapXUniswapFill<M> {}
 
 impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
-    fn decode_order(&self, encoded_order: &str) -> Result<V2DutchOrder, Box<dyn Error>> {
+    fn decode_order(&self, encoded_order: &str) -> Result<Order, Box<dyn Error>> {
         let encoded_order = if let Some(stripped) = encoded_order.strip_prefix("0x") {
             stripped
         } else {
@@ -104,7 +104,17 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         };
         let order_hex: Vec<u8> = hex::decode(encoded_order)?;
 
-        V2DutchOrder::decode_inner(&order_hex, false)
+        // Try to decode as V2DutchOrder first
+        match V2DutchOrder::decode_inner(&order_hex, false) {
+            Ok(v2_order) => Ok(Order::V2DutchOrder(v2_order)),
+            Err(_) => {
+                // If V2 decoding fails, try V3DutchOrder
+                match V3DutchOrder::decode_inner(&order_hex, false) {
+                    Ok(v3_order) => Ok(Order::V3DutchOrder(v3_order)),
+                    Err(e) => Err(e),
+                }
+            }
+        }
     }
 
     // Process new orders as they come in.
@@ -133,36 +143,58 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
 
         let OrderBatchData {
-            // orders,
             orders,
             amount_out_required,
             ..
         } = &event.request;
 
-        if let Some(profit) = self.get_profit_eth(event) {
-            info!(
-                "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
-                orders.len(),
-                event.route.quote_gas_adjusted,
-                amount_out_required,
-                profit
-            );
-            let signed_orders = self.get_signed_orders(orders.clone()).ok()?;
-            return Some(Action::SubmitTx(SubmitTxToMempool {
-                tx: self
-                    .build_fill(
-                        self.client.clone(),
-                        &self.executor_address,
-                        signed_orders,
-                        event,
-                    )
-                    .await
-                    .ok()?,
-                gas_bid_info: Some(GasBidInfo {
-                    bid_percentage: self.bid_percentage,
-                    total_profit: profit,
-                }),
-            }));
+        let v2_orders: Vec<_> = orders.iter().filter(|o| matches!(o.order, Order::V2DutchOrder(_))).cloned().collect();
+        let v3_orders: Vec<_> = orders.iter().filter(|o| matches!(o.order, Order::V3DutchOrder(_))).cloned().collect();
+
+        for order_list in &[v2_orders, v3_orders] {
+            if order_list.is_empty() {
+                continue;
+            }
+
+            if let Some(profit) = self.get_profit_eth(&RoutedOrder {
+                request: OrderBatchData {
+                    orders: order_list.clone(),
+                    amount_out_required: *amount_out_required,
+                    ..event.request.clone()
+                },
+                route: event.route.clone(),
+            }) {
+                info!(
+                    "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
+                    order_list.len(),
+                    event.route.quote_gas_adjusted,
+                    amount_out_required,
+                    profit
+                );
+
+                let reactor_address = if matches!(order_list[0].order, Order::V2DutchOrder(_)) {
+                    ReactorAddress::DutchV2
+                } else {
+                    ReactorAddress::DutchV3
+                };
+                let signed_orders = self.get_signed_orders(order_list.clone()).ok()?;
+                return Some(Action::SubmitTx(SubmitTxToMempool {
+                    tx: self
+                        .build_fill(
+                            self.client.clone(),
+                            &self.executor_address,
+                            signed_orders,
+                            reactor_address,
+                            event,
+                        )
+                        .await
+                        .ok()?,
+                    gas_bid_info: Some(GasBidInfo {
+                        bid_percentage: self.bid_percentage,
+                        total_profit: profit,
+                    }),
+                }));
+            }
         }
 
         None
@@ -201,6 +233,12 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         for batch in orders.iter() {
             match &batch.order {
                 Order::V2DutchOrder(order) => {
+                    signed_orders.push(SignedOrder {
+                        order: Bytes::from(order.encode_inner()),
+                        sig: Bytes::from_str(&batch.signature)?,
+                    });
+                }
+                Order::V3DutchOrder(order) => {
                     signed_orders.push(SignedOrder {
                         order: Bytes::from(order.encode_inner()),
                         sig: Bytes::from_str(&batch.signature)?,
@@ -255,14 +293,18 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     }
 
     async fn handle_fills(&mut self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = DUTCHV2_REACTOR_ADDRESS.parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(self.last_block_number)
             .address(reactor_address)
             .event("Fill(bytes32,address,address,uint256)");
 
-        // early return on error
-        let logs = self.client.get_logs(&filter).await?;
+        let (v2_logs, v3_logs) = try_join!(
+            self.get_logs_for_reactor(DUTCHV2_REACTOR_ADDRESS.parse::<Address>().unwrap()),
+            self.get_logs_for_reactor(DUTCHV3_REACTOR_ADDRESS.parse::<Address>().unwrap())
+        )?;
+
+        let logs = v2_logs.into_iter().chain(v3_logs.into_iter());
         for log in logs {
             let order_hash = format!("0x{:x}", log.topics[1]);
             // remove from open
@@ -276,6 +318,17 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
 
         Ok(())
+    }
+
+    async fn get_logs_for_reactor(&mut self, reactor_address: Address) -> Result<Vec<ethers::types::Log>> {
+        let filter = Filter::new()
+            .select(self.last_block_number)
+            .address(reactor_address)
+            .event("Fill(bytes32,address,address,uint256)");
+
+        // early return on error
+        let logs = self.client.get_logs(&filter).await?;
+        return Ok(logs);
     }
 
     fn prune_done_orders(&mut self) {
@@ -298,7 +351,14 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             match &order_data.order {
                 Order::V2DutchOrder(order) => {
                     self.update_order_state(
-                        order.clone(),
+                        Order::V2DutchOrder(order.clone()),
+                        &order_data.signature,
+                        &order_hash.to_string(),
+                    );
+                }
+                Order::V3DutchOrder(order) => {
+                    self.update_order_state(
+                        Order::V3DutchOrder(order.clone()),
                         &order_data.signature,
                         &order_hash.to_string(),
                     );
@@ -320,8 +380,13 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String) {
-        let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
+    fn update_order_state(&mut self, order: Order, signature: &str, order_hash: &String) {
+        let resolved = match &order {
+            Order::V2DutchOrder(v2_order) => v2_order.resolve(self.last_block_timestamp + BLOCK_TIME),
+            Order::V3DutchOrder(v3_order) => v3_order.resolve(self.last_block_number, self.last_block_timestamp + BLOCK_TIME),
+            _ => return, // Ignore other order types for now
+        };
+
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
             OrderResolution::Invalid => OrderStatus::Done,
@@ -344,7 +409,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 self.open_orders.insert(
                     order_hash.clone(),
                     OrderData {
-                        order: Order::V2DutchOrder(order),
+                        order,
                         hash: order_hash.clone(),
                         signature: signature.to_string(),
                         resolved: resolved_order,

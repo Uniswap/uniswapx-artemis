@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
     };
 
     match &args.order_type {
-        OrderType::DutchV2 => {
+        OrderType::DutchV2 | OrderType::DutchV3 => {
             let uniswapx_strategy = UniswapXUniswapFill::new(
                 Arc::new(provider.clone()),
                 config.clone(),
