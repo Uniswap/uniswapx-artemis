@@ -14,22 +14,27 @@ use std::{
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Clone, Debug)]
 pub enum ReactorAddress {
     DutchV2,
     DutchV3,
+    Priority,
 }
 
 impl ReactorAddress {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ReactorAddress::DutchV2 => "0x00000011F84B9aa48e5f8aA8B9897600006289Be",
-            ReactorAddress::DutchV3 => "...", // Replace with actual V3 address when available
+            ReactorAddress::DutchV2 => DUTCHV2_REACTOR_ADDRESS,
+            ReactorAddress::DutchV3 => DUTCHV3_REACTOR_ADDRESS,
+            ReactorAddress::Priority => PRIORITY_REACTOR_ADDRESS,
         }
     }
 }
 
-pub const DUTCHV2_REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
-pub const DUTCHV3_REACTOR_ADDRESS: &str = "...";
+const DUTCHV2_REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+const DUTCHV3_REACTOR_ADDRESS: &str = "..."; // Replace with actual V3 address when available
+const PRIORITY_REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
 const SWAPROUTER_02_ADDRESS: &str = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
 pub const WETH_ADDRESS: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 

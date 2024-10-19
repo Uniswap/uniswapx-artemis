@@ -14,10 +14,10 @@ use ethers::{
 };
 use executors::protect_executor::ProtectExecutor;
 use executors::queued_executor::QueuedExecutor;
+use strategies::shared::ReactorAddress;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
-use strategies::priority_strategy::UniswapXPriorityFill;
 use strategies::{
     types::{Action, Config, Event},
     uniswapx_strategy::UniswapXUniswapFill,
@@ -195,28 +195,22 @@ async fn main() -> Result<()> {
         None
     };
 
-    match &args.order_type {
-        OrderType::DutchV2 | OrderType::DutchV3 => {
-            let uniswapx_strategy = UniswapXUniswapFill::new(
-                Arc::new(provider.clone()),
-                config.clone(),
-                batch_sender,
-                route_receiver,
-            );
-            engine.add_strategy(Box::new(uniswapx_strategy));
-        }
-        OrderType::Priority => {
-            let priority_strategy = UniswapXPriorityFill::new(
-                Arc::new(provider.clone()),
-                cloudwatch_client.clone(),
-                config.clone(),
-                batch_sender,
-                route_receiver,
-            );
+    let reactor_address = match args.order_type {
+        OrderType::DutchV2 => ReactorAddress::DutchV2,
+        OrderType::DutchV3 => ReactorAddress::DutchV3,
+        OrderType::Priority => ReactorAddress::Priority,
+    };
 
-            engine.add_strategy(Box::new(priority_strategy));
-        }
-    }
+    let priority_strategy = UniswapXUniswapFill::new(
+        Arc::new(provider.clone()),
+        cloudwatch_client.clone(),
+        config.clone(),
+        batch_sender,
+        route_receiver,
+        reactor_address,
+    );
+
+    engine.add_strategy(Box::new(priority_strategy));
 
     let protect_executor = Box::new(ProtectExecutor::new(
         provider.clone(),

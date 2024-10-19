@@ -182,17 +182,61 @@ pub enum OrderResolution {
     NotFillableYet(ResolvedOrder),
 }
 
-impl V2DutchOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
+pub struct ResolutionContext {
+    pub block_number: u64,
+    pub timestamp: u64,
+    pub priority_fee: U256,
+}
+
+pub trait ResolvableOrder: Sized {
+    fn resolve(&self, context: ResolutionContext) -> OrderResolution;
+    fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>>;
+    fn encode_inner(&self) -> Vec<u8>;
+}
+
+impl ResolvableOrder for Order {
+    fn resolve(&self, context: ResolutionContext) -> OrderResolution {
+        match self {
+            Order::V2DutchOrder(order) => order.resolve(context),
+            Order::PriorityOrder(order) => order.resolve(context),
+            Order::V3DutchOrder(order) => order.resolve(context),
+        }
+    }
+
+    fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
+        // Try decoding as each variant
+        if let Ok(order) = V2DutchOrder::decode_inner(order_hex, validate) {
+            return Ok(Order::V2DutchOrder(order));
+        }
+        if let Ok(order) = PriorityOrder::decode_inner(order_hex, validate) {
+            return Ok(Order::PriorityOrder(order));
+        }
+        if let Ok(order) = V3DutchOrder::decode_inner(order_hex, validate) {
+            return Ok(Order::V3DutchOrder(order));
+        }
+        Err("Failed to decode order".into())
+    }
+
+    fn encode_inner(&self) -> Vec<u8> {
+        match self {
+            Order::V2DutchOrder(order) => order.encode_inner(),
+            Order::PriorityOrder(order) => order.encode_inner(),
+            Order::V3DutchOrder(order) => order.encode_inner(),
+        }
+    }
+}
+
+impl ResolvableOrder for V2DutchOrder {
+    fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
         Ok(V2DutchOrder::decode_single(order_hex, validate)?)
     }
 
-    pub fn encode_inner(&self) -> Vec<u8> {
+    fn encode_inner(&self) -> Vec<u8> {
         V2DutchOrder::encode_single(self)
     }
 
-    pub fn resolve(&self, timestamp: u64) -> OrderResolution {
-        let timestamp = U256::from(timestamp);
+    fn resolve(&self, context: ResolutionContext) -> OrderResolution {
+        let timestamp = U256::from(context.timestamp);
 
         if self.info.deadline.lt(&timestamp) {
             return OrderResolution::Expired;
@@ -246,30 +290,30 @@ impl V2DutchOrder {
     }
 }
 
-impl PriorityOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
+impl ResolvableOrder for PriorityOrder {
+    fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
         Ok(PriorityOrder::decode_single(order_hex, validate)?)
     }
 
-    pub fn encode_inner(&self) -> Vec<u8> {
+    fn encode_inner(&self) -> Vec<u8> {
         PriorityOrder::encode_single(self)
     }
 
-    pub fn resolve(&self, block_number: u64, timestamp: u64, priority_fee: U256) -> OrderResolution {
-        let timestamp = U256::from(timestamp);
+    fn resolve(&self, context: ResolutionContext) -> OrderResolution {
+        let timestamp = U256::from(context.timestamp);
 
         if self.info.deadline.lt(&timestamp) {
             return OrderResolution::Expired;
         };
 
-        let input = self.input.scale(priority_fee);
+        let input = self.input.scale(context.priority_fee);
         let outputs = self
             .outputs
             .iter()
-            .map(|output| output.scale(priority_fee))
+            .map(|output| output.scale(context.priority_fee))
             .collect();
 
-        if U256::from(block_number).lt(&self.cosignerData.auctionTargetBlock.saturating_sub(U256::from(2))) {
+        if U256::from(context.block_number).lt(&self.cosignerData.auctionTargetBlock.saturating_sub(U256::from(2))) {
             return OrderResolution::NotFillableYet(ResolvedOrder { input, outputs });
         };
 
@@ -298,17 +342,17 @@ impl PriorityOutput {
     }
 }
 
-impl V3DutchOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
+impl ResolvableOrder for V3DutchOrder {
+    fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
         Ok(V3DutchOrder::decode_single(order_hex, validate)?)
     }
 
-    pub fn encode_inner(&self) -> Vec<u8> {
+    fn encode_inner(&self) -> Vec<u8> {
         V3DutchOrder::encode_single(self)
     }
 
-    pub fn resolve(&self, block_number: u64, timestamp: u64) -> OrderResolution {
-        let timestamp = U256::from(timestamp);
+    fn resolve(&self, context: ResolutionContext) -> OrderResolution {
+        let timestamp = U256::from(context.timestamp);
 
         if self.info.deadline.lt(&timestamp) {
             return OrderResolution::Expired;
@@ -320,7 +364,7 @@ impl V3DutchOrder {
             amount: match self.baseInput.curve.decay(
                 self.baseInput.startAmount,
                 self.cosignerData.decayStartBlock,
-                U256::from(block_number),
+                U256::from(context.block_number),
                 U256::from(0),
                 self.baseInput.maxAmount,
                 NonlinearDutchDecay::v3_linear_input_decay
@@ -337,14 +381,14 @@ impl V3DutchOrder {
                 let mut amount = output.curve.decay(
                     output.startAmount,
                     self.cosignerData.decayStartBlock,
-                    U256::from(block_number),
+                    U256::from(context.block_number),
                     output.minAmount,
                     U256::MAX,
                     NonlinearDutchDecay::v3_linear_output_decay
                 )?;
                 
                 // add exclusivity override to amount if before decay start block
-                if self.cosignerData.decayStartBlock.gt(&U256::from(block_number)) && !self.cosignerData.exclusiveFiller.is_zero() {
+                if self.cosignerData.decayStartBlock.gt(&U256::from(context.block_number)) && !self.cosignerData.exclusiveFiller.is_zero() {
                     let exclusivity = self.cosignerData.exclusivityOverrideBps.checked_add(BPS).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
                     let exclusivity = exclusivity.checked_mul(amount).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
                     amount = exclusivity.checked_div(BPS).ok_or(anyhow::Error::msg("Division by zero in exclusivity calculation"))?;

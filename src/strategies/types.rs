@@ -5,7 +5,7 @@ use crate::collectors::{
 use artemis_core::executors::mempool_executor::SubmitTxToMempool;
 use uniswapx_rs::order::ResolvedOrder;
 
-use super::priority_strategy::ExecutionMetadata;
+use super::uniswapx_strategy::ExecutionMetadata;
 
 /// Core Event enum for the current strategy.
 #[derive(Debug, Clone)]

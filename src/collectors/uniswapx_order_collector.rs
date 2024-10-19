@@ -147,7 +147,7 @@ mod tests {
     use ethers::utils::hex;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
-    use uniswapx_rs::order::V2DutchOrder;
+    use uniswapx_rs::order::{ResolvableOrder, V2DutchOrder};
 
     async fn get_collector(mock_response: &str) -> (UniswapXOrderCollector, ServerGuard, Mock) {
         let mut server = Server::new_async().await;
