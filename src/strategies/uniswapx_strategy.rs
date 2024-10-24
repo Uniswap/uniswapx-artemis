@@ -8,7 +8,7 @@ use crate::{
     },
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::UniswapXOrder,
+        uniswapx_order_collector::{OrderType, UniswapXOrder},
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
@@ -34,11 +34,10 @@ use tokio::sync::{
     RwLock,
 };
 use tracing::{error, info, warn};
-use uniswapx_rs::order::{Order, OrderResolution, PriorityOrder, ResolutionContext, MPS, ResolvableOrder};
+use uniswapx_rs::order::{Order, OrderResolution, ResolutionContext, MPS, ResolvableOrder};
 
 use super::types::{Action, Event};
 
-const BLOCK_TIME: u64 = 2;
 const DONE_EXPIRY: u64 = 300;
 // Base addresses
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
@@ -100,6 +99,8 @@ pub struct UniswapXUniswapFill<M> {
     batch_sender: Sender<Vec<OrderBatchData>>,
     route_receiver: Receiver<RoutedOrder>,
     reactor_address: ReactorAddress,
+    order_type: OrderType,
+    block_time: u64,
 }
 
 impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
@@ -109,10 +110,16 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         config: Config,
         sender: Sender<Vec<OrderBatchData>>,
         receiver: Receiver<RoutedOrder>,
-        reactor_address: ReactorAddress,
+        order_type: OrderType,
+        block_time: u64,
     ) -> Self {
         info!("syncing state");
 
+        let reactor_address = match order_type {
+            OrderType::DutchV2 => ReactorAddress::DutchV2,
+            OrderType::DutchV3 => ReactorAddress::DutchV3,
+            OrderType::Priority => ReactorAddress::Priority,
+        };
         Self {
             client,
             cloudwatch_client,
@@ -125,7 +132,9 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             done_orders: Arc::new(DashMap::new()),
             batch_sender: sender,
             route_receiver: receiver,
+            order_type,
             reactor_address,
+            block_time,
         }
     }
 }
@@ -210,7 +219,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         let order_hash = event.order_hash.clone();
         let resolved_order = order.resolve(ResolutionContext {
             block_number: *self.last_block_number.read().await,
-            timestamp: *self.last_block_timestamp.read().await + BLOCK_TIME,
+            timestamp: *self.last_block_timestamp.read().await + self.block_time,
             priority_fee: Uint::from(0),
         });
 
@@ -300,19 +309,26 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             ..
         } = &event.request;
 
-        if let Some(metadata) = self.get_execution_metadata(event) {
-            info!(
-                "{} - Sending trade: num trades: {} routed quote: {}, batch needs: {}",
-                metadata.order_hash,
-                orders.len(),
-                event.route.quote,
-                amount_out_required,
-            );
+        match &orders[0].order {
+            Order::V2DutchOrder(_) | Order::V3DutchOrder(_) => {
+                if let Some(profit) = self.get_profit_eth(&RoutedOrder {
+                    request: OrderBatchData {
+                        orders: orders.clone(),
+                        amount_out_required: *amount_out_required,
+                        ..event.request.clone()
+                    },
+                    route: event.route.clone(),
+                }) {
+                    info!(
+                        "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
+                        orders.len(),
+                        event.route.quote_gas_adjusted,
+                        amount_out_required,
+                        profit
+                    );
 
-            let signed_orders = self.get_signed_orders(orders.clone()).ok()?;
-            return Some(Action::SubmitPublicTx(
-                SubmitTxToMempoolWithExecutionMetadata {
-                    execution: SubmitTxToMempool {
+                    let signed_orders = self.get_signed_orders(orders.clone()).ok()?;
+                    return Some(Action::SubmitTx(SubmitTxToMempool {
                         tx: self
                             .build_fill(
                                 self.client.clone(),
@@ -325,15 +341,49 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                             .ok()?,
                         gas_bid_info: Some(GasBidInfo {
                             bid_percentage: self.bid_percentage,
-                            total_profit: U256::from(0),
+                            total_profit: profit,
                         }),
-                    },
-                    metadata,
-                },
-            ));
-        }
+                    }));
+                }
 
-        None
+                return None
+            },
+            Order::PriorityOrder(_) => {
+            if let Some(metadata) = self.get_execution_metadata(event) {
+                info!(
+                    "{} - Sending trade: num trades: {} routed quote: {}, batch needs: {}",
+                    metadata.order_hash,
+                    orders.len(),
+                    event.route.quote,
+                    amount_out_required,
+                );
+
+                let signed_orders = self.get_signed_orders(orders.clone()).ok()?;
+                return Some(Action::SubmitPublicTx(
+                    SubmitTxToMempoolWithExecutionMetadata {
+                        execution: SubmitTxToMempool {
+                            tx: self
+                                .build_fill(
+                                    self.client.clone(),
+                                    &self.executor_address,
+                                    signed_orders,
+                                    self.reactor_address.clone(),
+                                    event,
+                                )
+                                .await
+                                .ok()?,
+                            gas_bid_info: Some(GasBidInfo {
+                                bid_percentage: self.bid_percentage,
+                                total_profit: U256::from(0),
+                            }),
+                        },
+                        metadata,
+                    },
+                    ));
+                }
+                return None
+            }
+        }
     }
 
     /// Process new block events
@@ -392,17 +442,10 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     fn get_signed_orders(&self, orders: Vec<OrderData>) -> Result<Vec<SignedOrder>> {
         let mut signed_orders: Vec<SignedOrder> = Vec::new();
         for batch in orders.iter() {
-            match &batch.order {
-                Order::PriorityOrder(order) => {
-                    signed_orders.push(SignedOrder {
-                        order: Bytes::from(order.encode_inner()),
-                        sig: Bytes::from_str(&batch.signature)?,
-                    });
-                }
-                _ => {
-                    return Err(anyhow::anyhow!("Invalid order type"));
-                }
-            }
+            signed_orders.push(SignedOrder {
+                order: Bytes::from(batch.order.encode_inner()),
+                sig: Bytes::from_str(&batch.signature)?,
+            });
         }
         Ok(signed_orders)
     }
@@ -481,13 +524,13 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     /// if order is open, send for execution
     async fn process_new_order(
         &mut self,
-        order: PriorityOrder,
+        order: Order,
         order_hash: String,
         signature: &str,
     ) -> Result<()> {
         let resolved = order.resolve(ResolutionContext {
             block_number: *self.last_block_number.read().await,
-            timestamp: *self.last_block_timestamp.read().await + BLOCK_TIME,
+            timestamp: *self.last_block_timestamp.read().await + self.block_time,
             priority_fee: Uint::from(0),
         });
         let order_status = match resolved {
@@ -506,16 +549,23 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                     .insert(order_hash, self.current_timestamp()? + DONE_EXPIRY);
             }
             OrderStatus::NotFillableYet(_) => {
-                info!(
-                    "{} - Order not fillable yet at latest block: {}; target: {}",
-                    order_hash,
-                    *self.last_block_number.read().await,
-                    order.cosignerData.auctionTargetBlock
-                );
+                if let Order::PriorityOrder(priority_order) = &order {
+                    info!(
+                        "{} - Order not fillable yet at latest block: {}; target: {}",
+                        order_hash,
+                        *self.last_block_number.read().await,
+                        priority_order.cosignerData.auctionTargetBlock
+                    );
+                } else {
+                    info!(
+                        "{} - order not fillable yet",
+                        order_hash
+                    );
+                }
             }
             OrderStatus::Open(resolved_order) => {
                 let order_data = OrderData {
-                    order: Order::PriorityOrder(order),
+                    order,
                     hash: order_hash.to_string(),
                     signature: signature.to_string(),
                     resolved: resolved_order,
@@ -561,22 +611,28 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
 
         for order_hash in order_hashes {
             if let Some(order_data) = self.get_new_order(&order_hash) {
-                match &order_data.order {
-                    Order::PriorityOrder(order) => {
-                        if let Err(e) = self
-                            .process_new_order(
-                                order.clone(),
-                                order_hash.clone(),
-                                &order_data.signature,
-                            )
-                            .await
-                        {
-                            error!("Error processing new order: {}", e);
-                        }
-                    }
-                    _ => {
-                        error!("Invalid order type");
-                    }
+                // Check if the order type matches self.order_type
+                let order_matches = match (&order_data.order, &self.order_type) {
+                    (Order::PriorityOrder(_), OrderType::Priority) => true,
+                    (Order::V2DutchOrder(_), OrderType::DutchV2) => true,
+                    (Order::V3DutchOrder(_), OrderType::DutchV3) => true,
+                    _ => false,
+                };
+
+                if !order_matches {
+                    error!("{} - Order type doesn't match the expected type for this strategy", order_hash);
+                    continue;
+                }
+
+                if let Err(e) = self
+                    .process_new_order(
+                        order_data.order.clone(),
+                        order_hash.clone(),
+                        &order_data.signature,
+                    )
+                    .await
+                {
+                    error!("Error processing new order: {}", e);
                 }
             }
         }
@@ -600,4 +656,26 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             }
         }
     }
+
+    fn get_profit_eth(&self, RoutedOrder { request, route }: &RoutedOrder) -> Option<U256> {
+        let quote = U256::from_str_radix(&route.quote, 10).ok()?;
+        let amount_out_required =
+            U256::from_str_radix(&request.amount_out_required.to_string(), 10).ok()?;
+        if quote.le(&amount_out_required) {
+            return None;
+        }
+        let profit_quote = quote.saturating_sub(amount_out_required);
+
+        if request.token_out.to_lowercase() == WETH_ADDRESS.to_lowercase() {
+            return Some(profit_quote);
+        }
+
+        let gas_use_eth = U256::from_str_radix(&route.gas_use_estimate, 10)
+            .ok()?
+            .saturating_mul(U256::from_str_radix(&route.gas_price_wei, 10).ok()?);
+        profit_quote
+            .saturating_mul(gas_use_eth)
+            .checked_div(U256::from_str_radix(&route.gas_use_estimate_quote, 10).ok()?)
+    }
 }
+

@@ -66,7 +66,7 @@ pub struct Args {
     #[arg(long, required = true)]
     pub bid_percentage: u64,
 
-    /// Private key for sending txs.
+    /// The address of the executor contract.
     #[arg(long, required = true)]
     pub executor_address: String,
 
@@ -81,6 +81,10 @@ pub struct Args {
     /// chain id
     #[arg(long, required = true)]
     pub chain_id: u64,
+
+    /// Block time in seconds
+    #[arg(long, required = true)]
+    pub block_time: u64,
 }
 
 #[tokio::main]
@@ -195,19 +199,14 @@ async fn main() -> Result<()> {
         None
     };
 
-    let reactor_address = match args.order_type {
-        OrderType::DutchV2 => ReactorAddress::DutchV2,
-        OrderType::DutchV3 => ReactorAddress::DutchV3,
-        OrderType::Priority => ReactorAddress::Priority,
-    };
-
     let priority_strategy = UniswapXUniswapFill::new(
         Arc::new(provider.clone()),
         cloudwatch_client.clone(),
         config.clone(),
         batch_sender,
         route_receiver,
-        reactor_address,
+        args.order_type,
+        args.block_time
     );
 
     engine.add_strategy(Box::new(priority_strategy));

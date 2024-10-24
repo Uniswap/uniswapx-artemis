@@ -13,7 +13,7 @@ Then update the address constant in [uniswapx_strategy](./src/strategies/uniswap
 Finally, run the bot with the following command:
 
 ```
-cargo run -- --wss <websocket RPC url> --private-key <private key> --bid-percentage <percent of profit to share as gas>
+cargo run -- --wss <websocket RPC url> --private-key <private key> --bid-percentage <percent of profit to share as gas> --order_type <Priority|DutchV2|DutchV3> --chain-id <chain id> --block-time <avg block time in seconds> --executor-address <executor address>
 ```
 
 # Collectors
