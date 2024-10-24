@@ -38,13 +38,13 @@ pub mod currency_library {
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 M1\xEE\xC5q\xFC]\x8D\x0C3\x8Aok\xCENN\x15\xDE\xD1\"\xA4\xBE\t\xCA\xD8\xCE]fX\x1Fg\xB5dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 ~i\xC7G\x16\x96/c\xEF\xAB\x16\t\xD7w\x99.R\xDCp;m\xF2\x83r\x16\xFD\x9FJ\xDC_\xB5UdsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
     pub static CURRENCYLIBRARY_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 M1\xEE\xC5q\xFC]\x8D\x0C3\x8Aok\xCENN\x15\xDE\xD1\"\xA4\xBE\t\xCA\xD8\xCE]fX\x1Fg\xB5dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 ~i\xC7G\x16\x96/c\xEF\xAB\x16\t\xD7w\x99.R\xDCp;m\xF2\x83r\x16\xFD\x9FJ\xDC_\xB5UdsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
     pub static CURRENCYLIBRARY_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,

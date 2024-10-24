@@ -1,4 +1,4 @@
-pub use exclusivity_lib::*;
+pub use math_ext::*;
 /// This module was auto-generated with ethers-rs Abigen.
 /// More information at: <https://github.com/gakonst/ethers-rs>
 #[allow(
@@ -9,71 +9,57 @@ pub use exclusivity_lib::*;
     dead_code,
     non_camel_case_types,
 )]
-pub mod exclusivity_lib {
+pub mod math_ext {
     #[allow(deprecated)]
     fn __abi() -> ::ethers::core::abi::Abi {
         ::ethers::core::abi::ethabi::Contract {
             constructor: ::core::option::Option::None,
             functions: ::std::collections::BTreeMap::new(),
             events: ::std::collections::BTreeMap::new(),
-            errors: ::core::convert::From::from([
-                (
-                    ::std::borrow::ToOwned::to_owned("NoExclusiveOverride"),
-                    ::std::vec![
-                        ::ethers::core::abi::ethabi::AbiError {
-                            name: ::std::borrow::ToOwned::to_owned(
-                                "NoExclusiveOverride",
-                            ),
-                            inputs: ::std::vec![],
-                        },
-                    ],
-                ),
-            ]),
+            errors: ::std::collections::BTreeMap::new(),
             receive: false,
             fallback: false,
         }
     }
     ///The parsed JSON ABI of the contract.
-    pub static EXCLUSIVITYLIB_ABI: ::ethers::contract::Lazy<::ethers::core::abi::Abi> = ::ethers::contract::Lazy::new(
+    pub static MATHEXT_ABI: ::ethers::contract::Lazy<::ethers::core::abi::Abi> = ::ethers::contract::Lazy::new(
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xB0B\"\xEC|/\xB9\xF9|\xA5\xBB\xCE\xBF\xF6\x04\xECU\xA6\xBES\xCF[\x1D\t'q\x94I\xA9\xFD\xEF\x86dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \x0B`},`\x99;E\xBD^\xD7\xE8!\x88~]L\xCB\xA4\x9D8K.w\xBCe\xB2\xB4y\xFE\x15/dsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
-    pub static EXCLUSIVITYLIB_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static MATHEXT_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xB0B\"\xEC|/\xB9\xF9|\xA5\xBB\xCE\xBF\xF6\x04\xECU\xA6\xBES\xCF[\x1D\t'q\x94I\xA9\xFD\xEF\x86dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \x0B`},`\x99;E\xBD^\xD7\xE8!\x88~]L\xCB\xA4\x9D8K.w\xBCe\xB2\xB4y\xFE\x15/dsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
-    pub static EXCLUSIVITYLIB_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static MATHEXT_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,
     );
-    pub struct ExclusivityLib<M>(::ethers::contract::Contract<M>);
-    impl<M> ::core::clone::Clone for ExclusivityLib<M> {
+    pub struct MathExt<M>(::ethers::contract::Contract<M>);
+    impl<M> ::core::clone::Clone for MathExt<M> {
         fn clone(&self) -> Self {
             Self(::core::clone::Clone::clone(&self.0))
         }
     }
-    impl<M> ::core::ops::Deref for ExclusivityLib<M> {
+    impl<M> ::core::ops::Deref for MathExt<M> {
         type Target = ::ethers::contract::Contract<M>;
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
-    impl<M> ::core::ops::DerefMut for ExclusivityLib<M> {
+    impl<M> ::core::ops::DerefMut for MathExt<M> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
     }
-    impl<M> ::core::fmt::Debug for ExclusivityLib<M> {
+    impl<M> ::core::fmt::Debug for MathExt<M> {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple(::core::stringify!(ExclusivityLib))
-                .field(&self.address())
-                .finish()
+            f.debug_tuple(::core::stringify!(MathExt)).field(&self.address()).finish()
         }
     }
-    impl<M: ::ethers::providers::Middleware> ExclusivityLib<M> {
+    impl<M: ::ethers::providers::Middleware> MathExt<M> {
         /// Creates a new contract instance with the specified `ethers` client at
         /// `address`. The contract derefs to a `ethers::Contract` object.
         pub fn new<T: Into<::ethers::core::types::Address>>(
@@ -83,7 +69,7 @@ pub mod exclusivity_lib {
             Self(
                 ::ethers::contract::Contract::new(
                     address.into(),
-                    EXCLUSIVITYLIB_ABI.clone(),
+                    MATHEXT_ABI.clone(),
                     client,
                 ),
             )
@@ -119,8 +105,8 @@ pub mod exclusivity_lib {
             ::ethers::contract::ContractError<M>,
         > {
             let factory = ::ethers::contract::ContractFactory::new(
-                EXCLUSIVITYLIB_ABI.clone(),
-                EXCLUSIVITYLIB_BYTECODE.clone().into(),
+                MATHEXT_ABI.clone(),
+                MATHEXT_BYTECODE.clone().into(),
                 client,
             );
             let deployer = factory.deploy(constructor_args)?;
@@ -129,24 +115,9 @@ pub mod exclusivity_lib {
         }
     }
     impl<M: ::ethers::providers::Middleware> From<::ethers::contract::Contract<M>>
-    for ExclusivityLib<M> {
+    for MathExt<M> {
         fn from(contract: ::ethers::contract::Contract<M>) -> Self {
             Self::new(contract.address(), contract.client())
         }
     }
-    ///Custom Error type `NoExclusiveOverride` with signature `NoExclusiveOverride()` and selector `0xb9ec1e96`
-    #[derive(
-        Clone,
-        ::ethers::contract::EthError,
-        ::ethers::contract::EthDisplay,
-        serde::Serialize,
-        serde::Deserialize,
-        Default,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash
-    )]
-    #[etherror(name = "NoExclusiveOverride", abi = "NoExclusiveOverride()")]
-    pub struct NoExclusiveOverride;
 }

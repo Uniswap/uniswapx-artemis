@@ -26,13 +26,13 @@ pub mod permit_2_lib {
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 }\xC0\xC3\x0BA\xE8F\x11\x0F\x89\x02rc\x12\xFF\xB6\x81\n\xD4\xF3'\x9E\xBF1t\x11N\x0B\xD9wX\x16dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xF7\x08\xB1\x0C\x82\x19\x88Pj\xAF\xF2U\xBF8\x0F|am\x9F\x7FB\x9B\x89\x1C\xFD\x002$f\xB4\xE7\xC5dsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
     pub static PERMIT2LIB_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 }\xC0\xC3\x0BA\xE8F\x11\x0F\x89\x02rc\x12\xFF\xB6\x81\n\xD4\xF3'\x9E\xBF1t\x11N\x0B\xD9wX\x16dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xF7\x08\xB1\x0C\x82\x19\x88Pj\xAF\xF2U\xBF8\x0F|am\x9F\x7FB\x9B\x89\x1C\xFD\x002$f\xB4\xE7\xC5dsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
     pub static PERMIT2LIB_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,

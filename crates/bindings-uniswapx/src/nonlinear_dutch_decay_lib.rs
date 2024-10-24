@@ -1,4 +1,4 @@
-pub use exclusivity_lib::*;
+pub use nonlinear_dutch_decay_lib::*;
 /// This module was auto-generated with ethers-rs Abigen.
 /// More information at: <https://github.com/gakonst/ethers-rs>
 #[allow(
@@ -9,7 +9,7 @@ pub use exclusivity_lib::*;
     dead_code,
     non_camel_case_types,
 )]
-pub mod exclusivity_lib {
+pub mod nonlinear_dutch_decay_lib {
     #[allow(deprecated)]
     fn __abi() -> ::ethers::core::abi::Abi {
         ::ethers::core::abi::ethabi::Contract {
@@ -18,12 +18,10 @@ pub mod exclusivity_lib {
             events: ::std::collections::BTreeMap::new(),
             errors: ::core::convert::From::from([
                 (
-                    ::std::borrow::ToOwned::to_owned("NoExclusiveOverride"),
+                    ::std::borrow::ToOwned::to_owned("InvalidDecayCurve"),
                     ::std::vec![
                         ::ethers::core::abi::ethabi::AbiError {
-                            name: ::std::borrow::ToOwned::to_owned(
-                                "NoExclusiveOverride",
-                            ),
+                            name: ::std::borrow::ToOwned::to_owned("InvalidDecayCurve"),
                             inputs: ::std::vec![],
                         },
                     ],
@@ -34,46 +32,46 @@ pub mod exclusivity_lib {
         }
     }
     ///The parsed JSON ABI of the contract.
-    pub static EXCLUSIVITYLIB_ABI: ::ethers::contract::Lazy<::ethers::core::abi::Abi> = ::ethers::contract::Lazy::new(
-        __abi,
-    );
+    pub static NONLINEARDUTCHDECAYLIB_ABI: ::ethers::contract::Lazy<
+        ::ethers::core::abi::Abi,
+    > = ::ethers::contract::Lazy::new(__abi);
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xB0B\"\xEC|/\xB9\xF9|\xA5\xBB\xCE\xBF\xF6\x04\xECU\xA6\xBES\xCF[\x1D\t'q\x94I\xA9\xFD\xEF\x86dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 p\xCF+\xBF\xA9\xAEF\xB1\r\xDE@\xB2\xCD}\x16[\x1DJ\x04/\x1B\xA6/\x12\x15oG\xE5\x99\xF6\r@dsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
-    pub static EXCLUSIVITYLIB_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static NONLINEARDUTCHDECAYLIB_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xB0B\"\xEC|/\xB9\xF9|\xA5\xBB\xCE\xBF\xF6\x04\xECU\xA6\xBES\xCF[\x1D\t'q\x94I\xA9\xFD\xEF\x86dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 p\xCF+\xBF\xA9\xAEF\xB1\r\xDE@\xB2\xCD}\x16[\x1DJ\x04/\x1B\xA6/\x12\x15oG\xE5\x99\xF6\r@dsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
-    pub static EXCLUSIVITYLIB_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static NONLINEARDUTCHDECAYLIB_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,
     );
-    pub struct ExclusivityLib<M>(::ethers::contract::Contract<M>);
-    impl<M> ::core::clone::Clone for ExclusivityLib<M> {
+    pub struct NonlinearDutchDecayLib<M>(::ethers::contract::Contract<M>);
+    impl<M> ::core::clone::Clone for NonlinearDutchDecayLib<M> {
         fn clone(&self) -> Self {
             Self(::core::clone::Clone::clone(&self.0))
         }
     }
-    impl<M> ::core::ops::Deref for ExclusivityLib<M> {
+    impl<M> ::core::ops::Deref for NonlinearDutchDecayLib<M> {
         type Target = ::ethers::contract::Contract<M>;
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
-    impl<M> ::core::ops::DerefMut for ExclusivityLib<M> {
+    impl<M> ::core::ops::DerefMut for NonlinearDutchDecayLib<M> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
     }
-    impl<M> ::core::fmt::Debug for ExclusivityLib<M> {
+    impl<M> ::core::fmt::Debug for NonlinearDutchDecayLib<M> {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple(::core::stringify!(ExclusivityLib))
+            f.debug_tuple(::core::stringify!(NonlinearDutchDecayLib))
                 .field(&self.address())
                 .finish()
         }
     }
-    impl<M: ::ethers::providers::Middleware> ExclusivityLib<M> {
+    impl<M: ::ethers::providers::Middleware> NonlinearDutchDecayLib<M> {
         /// Creates a new contract instance with the specified `ethers` client at
         /// `address`. The contract derefs to a `ethers::Contract` object.
         pub fn new<T: Into<::ethers::core::types::Address>>(
@@ -83,7 +81,7 @@ pub mod exclusivity_lib {
             Self(
                 ::ethers::contract::Contract::new(
                     address.into(),
-                    EXCLUSIVITYLIB_ABI.clone(),
+                    NONLINEARDUTCHDECAYLIB_ABI.clone(),
                     client,
                 ),
             )
@@ -119,8 +117,8 @@ pub mod exclusivity_lib {
             ::ethers::contract::ContractError<M>,
         > {
             let factory = ::ethers::contract::ContractFactory::new(
-                EXCLUSIVITYLIB_ABI.clone(),
-                EXCLUSIVITYLIB_BYTECODE.clone().into(),
+                NONLINEARDUTCHDECAYLIB_ABI.clone(),
+                NONLINEARDUTCHDECAYLIB_BYTECODE.clone().into(),
                 client,
             );
             let deployer = factory.deploy(constructor_args)?;
@@ -129,12 +127,12 @@ pub mod exclusivity_lib {
         }
     }
     impl<M: ::ethers::providers::Middleware> From<::ethers::contract::Contract<M>>
-    for ExclusivityLib<M> {
+    for NonlinearDutchDecayLib<M> {
         fn from(contract: ::ethers::contract::Contract<M>) -> Self {
             Self::new(contract.address(), contract.client())
         }
     }
-    ///Custom Error type `NoExclusiveOverride` with signature `NoExclusiveOverride()` and selector `0xb9ec1e96`
+    ///Custom Error type `InvalidDecayCurve` with signature `InvalidDecayCurve()` and selector `0x0e996766`
     #[derive(
         Clone,
         ::ethers::contract::EthError,
@@ -147,6 +145,6 @@ pub mod exclusivity_lib {
         Eq,
         Hash
     )]
-    #[etherror(name = "NoExclusiveOverride", abi = "NoExclusiveOverride()")]
-    pub struct NoExclusiveOverride;
+    #[etherror(name = "InvalidDecayCurve", abi = "InvalidDecayCurve()")]
+    pub struct InvalidDecayCurve;
 }

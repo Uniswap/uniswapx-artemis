@@ -26,13 +26,13 @@ pub mod path {
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \x93\t\xAE\\\xBFH\x18\x96]\xA5\xD3-\xD1\t\xCBk\xD42\xBE7\xDA\xAD1\x0B*\xF8J/\xE5\x15\x85\xE5dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xF6\xB546\xE4\xB1\xA1\xFB\xED\x08\x0B\xB3\xA6\xA71\xD8\xEB\x07\n\n3\x1A\xCDq\xAE\x99\x18\x0B\xA5\x9A\x06\xFBdsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
     pub static PATH_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \x93\t\xAE\\\xBFH\x18\x96]\xA5\xD3-\xD1\t\xCBk\xD42\xBE7\xDA\xAD1\x0B*\xF8J/\xE5\x15\x85\xE5dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xF6\xB546\xE4\xB1\xA1\xFB\xED\x08\x0B\xB3\xA6\xA71\xD8\xEB\x07\n\n3\x1A\xCDq\xAE\x99\x18\x0B\xA5\x9A\x06\xFBdsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
     pub static PATH_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,
