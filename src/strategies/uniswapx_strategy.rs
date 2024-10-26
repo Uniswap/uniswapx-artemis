@@ -281,7 +281,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 );
             }
             OrderStatus::Done => {
-                info!("{} - Order already done, skipping", order_hash);
+                // info!("{} - Order already done, skipping", order_hash);
             }
         }
 

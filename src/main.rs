@@ -14,7 +14,6 @@ use ethers::{
 };
 use executors::protect_executor::ProtectExecutor;
 use executors::queued_executor::QueuedExecutor;
-use strategies::shared::ReactorAddress;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
@@ -160,7 +159,7 @@ async fn main() -> Result<()> {
     let mut engine = Engine::default();
 
     // Set up block collector.
-    let block_collector = Box::new(BlockCollector::new(provider.clone()));
+    let block_collector = Box::new(BlockCollector::new(provider.clone(), chain_id));
     let block_collector = CollectorMap::new(block_collector, Event::NewBlock);
     engine.add_collector(Box::new(block_collector));
 
