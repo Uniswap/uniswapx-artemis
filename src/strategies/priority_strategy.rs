@@ -452,6 +452,12 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         let amount_out_required =
             U256::from_str_radix(&request.amount_out_required.to_string(), 10).ok()?;
         if quote.le(&amount_out_required) {
+            info!(
+                "{} - Routed order is not profitable, quote: {}, amount_out_required: {}",
+                request.orders[0].hash.clone(),
+                quote,
+                amount_out_required
+            );
             return None;
         }
 
