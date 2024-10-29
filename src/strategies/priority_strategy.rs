@@ -457,7 +457,8 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 request.orders[0].hash.clone(),
                 quote,
                 amount_out_required,
-                (quote - amount_out_required) * 100 / quote
+                // amount out required is greater than quote, so we need to calculate the % diff
+                (amount_out_required - quote) * 100 / quote
             );
             return None;
         }
