@@ -8,12 +8,13 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::info;
 use uniswapx_rs::order::{Order, ResolvedOrder};
 
-use artemis_core::types::{Collector, CollectorStream};
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
+
+use crate::strategies::types::{Collector, CollectorStream, StrategyStateChange};
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "0.5";
@@ -245,6 +246,10 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn handle_state_change(&self, _state_change: StrategyStateChange) -> Result<()> {
+        Ok(())
     }
 }
 

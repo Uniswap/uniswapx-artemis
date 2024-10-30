@@ -1,14 +1,16 @@
 use anyhow::Result;
-use artemis_core::types::{Collector, CollectorStream};
 use async_trait::async_trait;
 use ethers::{
     prelude::Middleware,
     providers::JsonRpcClient,
     types::{H256, U256, U64},
 };
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use std::{sync::Arc, time::Duration};
 use tokio_stream::StreamExt;
+
+use crate::strategies::{shared::{ARBITRUM_CHAIN_ID, ARBITRUM_TESTNET_CHAIN_ID}, types::{Collector, CollectorStream, OrderState, StrategyStateChange}};
 
 const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -17,6 +19,8 @@ const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
 pub struct BlockCollector<M> {
     provider: Arc<M>,
     chain_id: u64,
+    strategy_order_state: RwLock<OrderState>,
+    has_yielded_block: RwLock<bool>,
 }
 
 /// A new block event, containing the block number and hash.
@@ -29,13 +33,17 @@ pub struct NewBlock {
 
 impl<M> BlockCollector<M> {
     pub fn new(provider: Arc<M>, chain_id: u64) -> Self {
-        Self { provider, chain_id }
+        Self { 
+            provider, 
+            chain_id, 
+            strategy_order_state: RwLock::new(OrderState::default()), 
+            has_yielded_block: RwLock::new(false) 
+        }
     }
 
-    // Add this new method to check if the network is Arbitrum
     fn is_arbitrum(&self) -> bool
     {
-        return self.chain_id == 42161 || self.chain_id == 421613
+        return self.chain_id == ARBITRUM_CHAIN_ID || self.chain_id == ARBITRUM_TESTNET_CHAIN_ID
     }
 }
 
@@ -68,35 +76,38 @@ where
             let mut last_block = start_block;
 
             loop {
-                if self.is_arbitrum() {
+                // only collect blocks if there are open orders
+                if *self.has_yielded_block.read().await && self.strategy_order_state.read().await.open == 0 && self.strategy_order_state.read().await.processing == 0 {
+                    //info!("No open orders, skipping block collection");
+                } else if self.is_arbitrum() {
                     // Polling approach for Arbitrum
-                    loop {
-                        match provider.get_block_number().await {
-                            Ok(block_number) => {
-                                if block_number.as_u64() > last_block {
-                                    match provider.get_block(block_number).await {
-                                        Ok(Some(block)) => {
-                                            last_block = block_number.as_u64();
-                                            yield NewBlock {
-                                                hash: block.hash.unwrap(),
-                                                number: block_number,
-                                                timestamp: block.timestamp,
-                                            };
-                                        },
-                                        Ok(None) => {
-                                            warn!("Block {} not found.", block_number);
-                                        },
-                                        Err(e) => {
-                                            error!("Error fetching block {}: {}.", block_number, e);
-                                        }
+                    match provider.get_block_number().await {
+                        Ok(block_number) => {
+                            let current_block = block_number.as_u64();
+                            // Process all blocks from last_block + 1 up to current_block
+                            for block_num in (last_block + 1)..=current_block {
+                                match provider.get_block(block_num).await {
+                                    Ok(Some(block)) => {
+                                        yield NewBlock {
+                                            hash: block.hash.unwrap(),
+                                            number: U64::from(block_num),
+                                            timestamp: block.timestamp,
+                                        };
+                                        *self.has_yielded_block.write().await = true;
+                                    },
+                                    Ok(None) => {
+                                        warn!("Block {} not found.", block_num);
+                                    },
+                                    Err(e) => {
+                                        error!("Error fetching block {}: {}.", block_num, e);
                                     }
                                 }
-                            },
-                            Err(e) => {
-                                error!("Error fetching latest block number: {}. Retrying...", e);
                             }
+                            last_block = current_block;
+                        },
+                        Err(e) => {
+                            error!("Error fetching latest block number: {}. Retrying...", e);
                         }
-                        tokio::time::sleep(polling_interval).await;
                     }
                 } else {
                     // Existing watch_blocks() approach for other networks
@@ -112,43 +123,38 @@ where
                             continue;
                         }
                     };
-
-                    // Iterate over incoming block hashes
-                    loop {
-                        match watcher.next().await {
-                            Some(block_hash) => {
-                                match provider.get_block(block_hash).await {
-                                    Ok(Some(block)) => {
-                                        let block_number = block.number.unwrap().as_u64();
-                                        let block_timestamp = block.timestamp;
+                    match watcher.next().await {
+                        Some(block_hash) => {
+                            match provider.get_block(block_hash).await {
+                                Ok(Some(block)) => {
+                                    let block_number = block.number.unwrap().as_u64();
+                                    let block_timestamp = block.timestamp;
+                                    
+                                    // Update last processed block number
+                                    if block_number > last_block {
+                                        last_block = block_number;
                                         
-                                        // Update last processed block number
-                                        if block_number > last_block {
-                                            last_block = block_number;
-                                            
-                                            yield NewBlock {
-                                                hash: block.hash.unwrap(),
-                                                number: U64::from(block_number),
-                                                timestamp: block_timestamp,
-                                            };
-                                        }
-                                    },
-                                    Ok(None) => {
-                                        warn!("Received block hash {} but block not found.", block_hash);
-                                    },
-                                    Err(e) => {
-                                        error!("Error fetching block {}: {}.", block_hash, e);
+                                        yield NewBlock {
+                                            hash: block.hash.unwrap(),
+                                            number: U64::from(block_number),
+                                            timestamp: block_timestamp,
+                                        };
+                                        *self.has_yielded_block.write().await = true;
                                     }
+                                },
+                                Ok(None) => {
+                                    warn!("Received block hash {} but block not found.", block_hash);
+                                },
+                                Err(e) => {
+                                    error!("Error fetching block {}: {}.", block_hash, e);
                                 }
-                            },
-                            None => {
-                                warn!("Block watcher stream ended unexpectedly. Recreating watcher...");
-                                break; // Break inner loop to recreate watcher
                             }
+                        },
+                        None => {
+                            warn!("Block watcher stream ended unexpectedly. Recreating watcher...");
+                            break; // Break inner loop to recreate watcher
                         }
                     }
-                    // Delay before attempting to recreate the watcher to prevent tight loops
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 // Delay before attempting to recreate the watcher to prevent tight loops
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -156,5 +162,14 @@ where
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()> {
+        match state_change {
+            StrategyStateChange::OrderState(order_state) => {
+                *self.strategy_order_state.write().await = order_state;
+            }
+        }
+        Ok(())
     }
 }

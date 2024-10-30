@@ -75,7 +75,7 @@ where
             .await
             .unwrap_or_else(|err| {
                 info!("Error estimating gas: {}", err);
-                U256::from(1_000_000)
+                U256::from(10_000_000)
             });
         info!("Gas Usage {:?}", gas_usage_result);
         let gas_usage = gas_usage_result;

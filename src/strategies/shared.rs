@@ -23,20 +23,24 @@ pub enum ReactorAddress {
 }
 
 impl ReactorAddress {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ReactorAddress::DutchV2 => DUTCHV2_REACTOR_ADDRESS,
-            ReactorAddress::DutchV3 => DUTCHV3_REACTOR_ADDRESS,
-            ReactorAddress::Priority => PRIORITY_REACTOR_ADDRESS,
+    pub fn as_str(&self, chain_id: u64) -> &'static str {
+        match (self, chain_id) {
+            (ReactorAddress::DutchV2, ARBITRUM_CHAIN_ID) => DUTCHV2_ARBITRUM_REACTOR_ADDRESS, // Arbitrum
+            (ReactorAddress::DutchV2, _) => DUTCHV2_REACTOR_ADDRESS,              // Default/Mainnet
+            (ReactorAddress::DutchV3, _) => DUTCHV3_REACTOR_ADDRESS,
+            (ReactorAddress::Priority, _) => PRIORITY_REACTOR_ADDRESS,
         }
     }
 }
 
 const DUTCHV2_REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+const DUTCHV2_ARBITRUM_REACTOR_ADDRESS: &str = "0x1bd1aAdc9E230626C44a139d7E70d842749351eb";
 const DUTCHV3_REACTOR_ADDRESS: &str = "0xB274d5F4b833b61B340b654d600A864fB604a87c";
 const PRIORITY_REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
 const SWAPROUTER_02_ADDRESS: &str = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
 pub const WETH_ADDRESS: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+pub const ARBITRUM_CHAIN_ID: u64 = 42161;
+pub const ARBITRUM_TESTNET_CHAIN_ID: u64 = 421613;
 
 #[async_trait]
 pub trait UniswapXStrategy<M: Middleware + 'static> {
@@ -66,7 +70,7 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
             .await?;
 
         let reactor_approval = self
-            .get_tokens_to_approve(client.clone(), token_out, executor_address, reactor_address.as_str())
+            .get_tokens_to_approve(client.clone(), token_out, executor_address, reactor_address.as_str(chain_id.as_u64()))
             .await?;
 
         // Strip off function selector

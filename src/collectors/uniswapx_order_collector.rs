@@ -1,7 +1,6 @@
-use anyhow::Result;
-use artemis_core::types::{Collector, CollectorStream};
+use anyhow::{Error, Result};
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use std::fmt;
@@ -9,6 +8,8 @@ use std::str::FromStr;
 use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
+
+use crate::strategies::types::{Collector, CollectorStream, StrategyStateChange};
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_SECS: u64 = 1;
@@ -101,16 +102,15 @@ impl UniswapXOrderCollector {
 
 /// Implementation of the [Collector](Collector) trait for the
 /// [UniswapXOrderCollector](UniswapXOrderCollector).
-// TODO: implement order deduplication
 #[async_trait]
-impl Collector<UniswapXOrder> for UniswapXOrderCollector {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, UniswapXOrder>> {
+impl Collector<UniswapXOrderResponse> for UniswapXOrderCollector {
+    async fn get_event_stream(&self) -> Result<CollectorStream<'_, UniswapXOrderResponse>> {
         let url = format!(
             "{}/orders?orderStatus=open&chainId={}&orderType={}",
             self.base_url, self.chain_id, self.order_type,
         );
 
-        // stream that polls the UniswapX API every 5 seconds
+        // stream that polls the UniswapX API every 1 second
         let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(
             POLL_INTERVAL_SECS,
         )))
@@ -120,16 +120,10 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             async move {
                 let response = client.get(url).send().await?;
                 let data = response.json::<UniswapXOrderResponse>().await?;
-                Ok(data.orders)
+                Ok::<UniswapXOrderResponse, Error>(data)
             }
         })
-        .flat_map(
-            |values_result: Result<Vec<UniswapXOrder>>| match values_result {
-                Ok(values) => stream::iter(values.into_iter().map(Ok)).left_stream(),
-                Err(e) => stream::once(async { Err(e) }).right_stream(),
-            },
-        )
-        .filter_map(|result| async {
+        .filter_map(|result: std::result::Result<UniswapXOrderResponse, _>| async {
             match result {
                 Ok(value) => Some(value),
                 Err(_) => None, // if Err, ignore the value
@@ -138,12 +132,16 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
 
         Ok(Box::pin(stream))
     }
+
+    async fn handle_state_change(&self, _state_change: StrategyStateChange) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
-    use artemis_core::types::Collector;
+    use crate::strategies::types::Collector;
     use ethers::utils::hex;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
@@ -179,17 +177,14 @@ mod tests {
         let (collector, _server, mock) = get_collector(response).await;
         // get event stream and parse events
         let stream = collector.get_event_stream().await.unwrap();
-        let (first_order, stream) = stream.into_future().await;
+        let (first_order, _stream) = stream.into_future().await;
         assert!(first_order.is_some());
         assert_eq!(
-            first_order.unwrap().order_hash,
+            first_order.as_ref().unwrap().orders[0].order_hash,
             "0x3097f9cf452520c6e8f598f0765a7a19249a7355223664cacf9a86b7c5a46a4a"
         );
-
-        let (second_order, _) = stream.into_future().await;
-        assert!(second_order.is_some());
         assert_eq!(
-            second_order.unwrap().order_hash,
+            first_order.as_ref().unwrap().orders[1].order_hash,
             "0x0ea53d4ce1524dda9d667e6ba2e0bf3e630d72ebc8946f1528e4a693f2b8b2e9"
         );
         mock.assert_async().await;
@@ -205,10 +200,10 @@ mod tests {
         let (first_order, _) = stream.into_future().await;
         assert!(first_order.is_some());
         assert_eq!(
-            first_order.clone().unwrap().order_hash,
+            first_order.clone().unwrap().orders[0].order_hash,
             "0x382f612930c2121ed91fcdc00972f76b4adbef8d111830e1d135ac944a144876"
         );
-        let encoded_order = &first_order.unwrap().encoded_order;
+        let encoded_order = &first_order.unwrap().orders[0].encoded_order;
         let encoded_order = if encoded_order.starts_with("0x") {
             &encoded_order[2..]
         } else {

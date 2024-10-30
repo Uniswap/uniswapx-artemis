@@ -1,11 +1,10 @@
 use anyhow::Result;
 use clap::{ArgGroup, Parser};
 
-use artemis_core::engine::Engine;
-use artemis_core::types::{CollectorMap, ExecutorMap};
-use collectors::uniswapx_order_collector::OrderType;
+use artemis_core::types::ExecutorMap;
 use collectors::{
-    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
+    uniswapx_order_collector::{OrderType, UniswapXOrderCollector},
+    block_collector::BlockCollector,
     uniswapx_route_collector::UniswapXRouteCollector,
 };
 use ethers::{
@@ -17,9 +16,10 @@ use executors::queued_executor::QueuedExecutor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
+use engine::Engine;
 use strategies::{
-    types::{Action, Config, Event},
-    uniswapx_strategy::UniswapXUniswapFill,
+        types::{Action, Config, Event, CollectorMap},
+        uniswapx_strategy::UniswapXUniswapFill,
 };
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, Level};
@@ -29,6 +29,7 @@ pub mod aws_utils;
 pub mod collectors;
 pub mod executors;
 pub mod strategies;
+pub mod engine;
 
 const MEV_BLOCKER: &str = "https://rpc.mevblocker.io/noreverts";
 
@@ -171,7 +172,7 @@ async fn main() -> Result<()> {
         args.order_type.clone(),
     ));
     let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
-        Event::UniswapXOrder(Box::new(e))
+        Event::UniswapXOrderResponse(Box::new(e))
     });
     engine.add_collector(Box::new(uniswapx_order_collector));
 
@@ -198,17 +199,18 @@ async fn main() -> Result<()> {
         None
     };
 
-    let priority_strategy = UniswapXUniswapFill::new(
+    let strategy = UniswapXUniswapFill::new(
         Arc::new(provider.clone()),
         cloudwatch_client.clone(),
         config.clone(),
         batch_sender,
         route_receiver,
         args.order_type,
-        args.block_time
+        args.block_time,
+        chain_id
     );
 
-    engine.add_strategy(Box::new(priority_strategy));
+    engine.add_strategy(Box::new(strategy));
 
     let protect_executor = Box::new(ProtectExecutor::new(
         provider.clone(),

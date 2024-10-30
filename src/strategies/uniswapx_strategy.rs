@@ -8,7 +8,7 @@ use crate::{
     },
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::{OrderType, UniswapXOrder},
+        uniswapx_order_collector::{OrderType, UniswapXOrderResponse},
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
@@ -16,7 +16,6 @@ use crate::{
 use alloy_primitives::Uint;
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
-use artemis_core::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use bindings_uniswapx::shared_types::SignedOrder;
@@ -26,7 +25,7 @@ use ethers::{
     types::{Address, Bytes, Filter, U256},
     utils::hex,
 };
-use std::error::Error;
+use std::{collections::HashSet, error::Error};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{
@@ -36,7 +35,7 @@ use tokio::sync::{
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, ResolutionContext, MPS, ResolvableOrder};
 
-use super::types::{Action, Event};
+use super::types::{Action, Event, OrderState, StrategyStateChange, StatefulStrategy};
 
 const DONE_EXPIRY: u64 = 300;
 // Base addresses
@@ -101,6 +100,8 @@ pub struct UniswapXUniswapFill<M> {
     reactor_address: ReactorAddress,
     order_type: OrderType,
     block_time: u64,
+    chain_id: u64,
+    last_order_state: RwLock<Option<OrderState>>,
 }
 
 impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
@@ -112,6 +113,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         receiver: Receiver<RoutedOrder>,
         order_type: OrderType,
         block_time: u64,
+        chain_id: u64,
     ) -> Self {
         info!("syncing state");
 
@@ -135,12 +137,34 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             order_type,
             reactor_address,
             block_time,
+            chain_id,
+            last_order_state: RwLock::new(None),
+        }
+    }
+
+    async fn get_current_order_state(&self) -> OrderState {
+        OrderState {
+            open: self.new_orders.len(),
+            processing: self.processing_orders.len(),
+            done: self.done_orders.len(),
+        }
+    }
+
+    pub async fn get_current_state_change(&self) -> Option<StrategyStateChange> {
+        let current_state = self.get_current_order_state().await;
+        
+        // If state has changed or this is the first state
+        if self.last_order_state.read().await.as_ref() != Some(&current_state) {
+            *self.last_order_state.write().await = Some(current_state.clone());
+            Some(StrategyStateChange::OrderState(current_state))
+        } else {
+            None
         }
     }
 }
 
 #[async_trait]
-impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXUniswapFill<M> {
+impl<M: Middleware + 'static> StatefulStrategy<Event, Action> for UniswapXUniswapFill<M> {
     async fn sync_state(&mut self) -> Result<()> {
         info!("syncing state");
 
@@ -150,10 +174,14 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXUniswapFill<M>
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
     async fn process_event(&mut self, event: Event) -> Option<Action> {
         match event {
-            Event::UniswapXOrder(order) => self.process_order_event(&order).await,
+            Event::UniswapXOrderResponse(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
             Event::UniswapXRoute(route) => self.process_new_route(&route).await,
         }
+    }
+
+    async fn get_state_change(&self) -> Option<StrategyStateChange> {
+        self.get_current_state_change().await
     }
 }
 
@@ -193,98 +221,106 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     ///     - skip if we have already processed this order
     ///     - immediately send for execution if order is fillable
     ///     - otherwise add to new_orders to be processed on new block event
-    async fn process_order_event(&self, event: &UniswapXOrder) -> Option<Action> {
-        if *self.last_block_timestamp.read().await == 0 {
-            info!(
-                "{} - skipping processing new order event (no timestamp)",
-                event.order_hash
-            );
-            return None;
-        }
-        if self.new_orders.contains_key(&event.order_hash)
-            || self.processing_orders.contains_key(&event.order_hash)
-        {
-            info!(
-                "{} - skipping processing new order event (already tracking)",
-                event.order_hash
-            );
-            return None;
-        }
+    async fn process_order_event(&self, event: &UniswapXOrderResponse) -> Option<Action> {
+        // Get set of order hashes from the event
+        let event_order_hashes: HashSet<_> = event.orders.iter()
+            .map(|order| order.order_hash.clone())
+            .collect();
 
-        let order = self
-            .decode_order(&event.encoded_order)
-            .map_err(|e| error!("failed to decode: {}", e))
-            .ok()?;
-
-        let order_hash = event.order_hash.clone();
-        let resolved_order = order.resolve(ResolutionContext {
-            block_number: *self.last_block_number.read().await,
-            timestamp: *self.last_block_timestamp.read().await + self.block_time,
-            priority_fee: Uint::from(0),
-        });
-
-        let order_status = match resolved_order {
-            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
-            OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
-        };
-
-        match order_status {
-            OrderStatus::Open(resolved) => {
-                if self.done_orders.contains_key(&order_hash) {
-                    info!(
-                        "{} - New order processing already done, skipping",
-                        order_hash
-                    );
-                    return None;
-                }
-                let order_data = OrderData {
-                    order,
-                    hash: order_hash.clone(),
-                    signature: event.signature.clone(),
-                    resolved,
-                };
-                self.processing_orders
-                    .insert(order_hash.clone(), order_data.clone());
-
+        // Remove orders from new_orders that aren't in the event
+        self.new_orders.retain(|hash, _| event_order_hashes.contains(hash));
+        for event in &event.orders {
+            if *self.last_block_timestamp.read().await == 0 {
                 info!(
-                    "{} - Sending incoming order immediately for routing and execution at block {}",
-                    order_hash,
-                    *self.last_block_number.read().await
+                    "{} - skipping processing new order event (no timestamp)",
+                    event.order_hash
                 );
-                let order_batch = self.get_order_batch(&order_data);
-                self.try_send_order_batch(order_batch, order_hash, order_data)
-                    .await;
+                return None;
             }
-            OrderStatus::NotFillableYet(resolved) => {
-                if let Order::PriorityOrder(priority_order) = &order {
-                    info!(
-                        "{} - Priority order not fillable yet - last block: {}, target: {}",
-                        order_hash,
-                        *self.last_block_number.read().await,
-                        priority_order.cosignerData.auctionTargetBlock
-                    );
-                } else {
-                    info!(
-                        "{} - order not fillable yet",
-                        order_hash
-                    );
-                }
-                self.new_orders.insert(
-                    order_hash.clone(),
-                    OrderData {
+            if self.new_orders.contains_key(&event.order_hash)
+                || self.processing_orders.contains_key(&event.order_hash)
+            {
+                info!(
+                    "{} - skipping processing new order event (already tracking)",
+                    event.order_hash
+                );
+                return None;
+            }
+
+            let order = self
+                .decode_order(&event.encoded_order)
+                .map_err(|e| error!("failed to decode: {}", e))
+                .ok()?;
+
+            let order_hash = event.order_hash.clone();
+            let resolved_order = order.resolve(ResolutionContext {
+                block_number: *self.last_block_number.read().await,
+                timestamp: *self.last_block_timestamp.read().await + self.block_time,
+                priority_fee: Uint::from(0),
+            });
+
+            let order_status = match resolved_order {
+                OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
+                OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
+                OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
+            };
+
+            match order_status {
+                OrderStatus::Open(resolved) => {
+                    if self.done_orders.contains_key(&order_hash) {
+                        info!(
+                            "{} - New order processing already done, skipping",
+                            order_hash
+                        );
+                        return None;
+                    }
+                    let order_data = OrderData {
                         order,
                         hash: order_hash.clone(),
                         signature: event.signature.clone(),
                         resolved,
-                    },
-                );
-            }
-            OrderStatus::Done => {
-                // info!("{} - Order already done, skipping", order_hash);
+                    };
+                    self.processing_orders
+                        .insert(order_hash.clone(), order_data.clone());
+
+                    info!(
+                        "{} - Sending incoming order immediately for routing and execution at block {}",
+                        order_hash,
+                        *self.last_block_number.read().await
+                    );
+                    let order_batch = self.get_order_batch(&order_data);
+                    self.try_send_order_batch(order_batch, order_hash, order_data)
+                        .await;
+                }
+                OrderStatus::NotFillableYet(resolved) => {
+                    if let Order::PriorityOrder(priority_order) = &order {
+                        info!(
+                            "{} - Priority order not fillable yet - last block: {}, target: {}",
+                            order_hash,
+                            *self.last_block_number.read().await,
+                            priority_order.cosignerData.auctionTargetBlock
+                        );
+                    } else {
+                        info!(
+                            "{} - order not fillable yet",
+                            order_hash
+                        );
+                    }
+                    self.new_orders.insert(
+                        order_hash.clone(),
+                        OrderData {
+                            order,
+                            hash: order_hash.clone(),
+                            signature: event.signature.clone(),
+                            resolved,
+                        },
+                    );
+                }
+                OrderStatus::Done => {
+                    // info!("{} - Order already done, skipping", order_hash);
+                }
             }
         }
-
         None
     }
 
@@ -468,7 +504,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     }
 
     async fn handle_fills(&self) -> Result<()> {
-        let reactor_address = self.reactor_address.as_str().parse::<Address>().unwrap();
+        let reactor_address = self.reactor_address.as_str(self.chain_id).parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(*self.last_block_number.read().await)
             .address(reactor_address)
