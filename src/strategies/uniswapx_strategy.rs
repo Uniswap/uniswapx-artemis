@@ -15,7 +15,7 @@ use crate::{
 };
 use alloy_primitives::Uint;
 use anyhow::Result;
-use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
+use artemis_core::{executors::mempool_executor::{GasBidInfo, SubmitTxToMempool}, types::Strategy};
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use bindings_uniswapx::shared_types::SignedOrder;
@@ -35,7 +35,7 @@ use tokio::sync::{
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, ResolutionContext, MPS, ResolvableOrder};
 
-use super::types::{Action, Event, OrderState, StatefulStrategy};
+use super::types::{Action, Event, OrderState};
 
 const DONE_EXPIRY: u64 = 300;
 // Base addresses
@@ -153,7 +153,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
 }
 
 #[async_trait]
-impl<M: Middleware + 'static> StatefulStrategy<Event, Action> for UniswapXUniswapFill<M> {
+impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXUniswapFill<M> {
     async fn sync_state(&mut self) -> Result<()> {
         info!("syncing state");
 
@@ -168,17 +168,6 @@ impl<M: Middleware + 'static> StatefulStrategy<Event, Action> for UniswapXUniswa
             Event::UniswapXRoute(route) => self.process_new_route(&route).await,
         }
     }
-
-    // async fn get_state_change_stream(&self) -> Option<StrategyStateChange> {
-    //     // stream that polls the UniswapX API every 1 second
-    //     let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(
-    //         POLL_INTERVAL_SECS,
-    //     )))
-    //     .then(move |_| {
-    //     });
-
-    //     Ok(Box::pin(stream))
-    // }
 }
 
 impl<M: Middleware + 'static> UniswapXStrategy<M> for UniswapXUniswapFill<M> {}
@@ -226,14 +215,19 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         // Remove orders from tracking and move to done_orders if they aren't in the event
         let current_timestamp = self.current_timestamp().unwrap() + DONE_EXPIRY;
         
-        for map in [&self.new_orders, &self.processing_orders] {
-            map.retain(|hash, _| {
-                let keep = event_order_hashes.contains(hash);
-                if !keep {
-                    self.done_orders.insert(hash.clone(), current_timestamp);
+        for order_list in [&self.new_orders, &self.processing_orders] {
+            let mut dropped_orders = Vec::new();
+            for order in order_list.iter() {
+                if !event_order_hashes.contains(&order.hash) {
+                    dropped_orders.push(order.hash.clone());
                 }
-                keep
-            });
+            }
+            for order_hash in dropped_orders {
+                order_list.remove(&order_hash);
+                self.done_orders.insert(order_hash.clone(), current_timestamp);
+                info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+                self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
+            }
         }
 
         for event in &event.orders {
@@ -276,7 +270,9 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                     };
                     self.processing_orders
                         .insert(order_hash.clone(), order_data.clone());
-
+                    info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+                    self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
+                    
                     info!(
                         "{} - Sending incoming order immediately for routing and execution at block {}",
                         order_hash,
@@ -309,6 +305,8 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                             resolved,
                         },
                     );
+                    info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+                    self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
                 }
                 OrderStatus::Done => {
                     // info!("{} - Order already done, skipping", order_hash);
@@ -318,17 +316,11 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                             order_hash.to_string(),
                             self.current_timestamp().unwrap() + DONE_EXPIRY,
                         );
+
+                        info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+                        self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
                     }
                 }
-            }
-        }
-        // send current state to the order state channel
-        let order_state = self.get_current_order_state();
-        // info!("Sending current order state new {}, processing {}, done {}", order_state.open, order_state.processing, order_state.done);
-        match self.order_state_sender.send(order_state).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Failed to send order state: {}", e);
             }
         }
         None
@@ -671,6 +663,8 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 );
                 self.processing_orders.remove(&order_hash);
                 self.new_orders.insert(order_hash.clone(), order_data);
+                info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+                self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
             }
         }
     }

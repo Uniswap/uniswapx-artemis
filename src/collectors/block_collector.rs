@@ -12,7 +12,9 @@ use std::{sync::Arc, time::Duration};
 use tokio_stream::StreamExt;
 use tokio::sync::mpsc::Receiver;
 
-use crate::strategies::{shared::{ARBITRUM_CHAIN_ID, ARBITRUM_TESTNET_CHAIN_ID}, types::{Collector, CollectorStream, OrderState}};
+use crate::strategies::shared::{ARBITRUM_CHAIN_ID, ARBITRUM_TESTNET_CHAIN_ID};
+use crate::strategies::types::OrderState;
+use artemis_core::types::{Collector, CollectorStream};
 
 const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -76,48 +78,48 @@ where
 
         let stream = async_stream::stream! {
             let mut last_block = start_block;
+            let mut order_state = OrderState::default();
             loop {
-                let mut receiver = self.order_state_receiver.lock().await;
-                let mut order_state = OrderState::default();
-                // Collect all available messages without blocking
-                while let Ok(new_state) = receiver.try_recv() {
-                    // if new_state.open != 0 || new_state.processing != 0 {
-                    // info!("Received new state: {:?}", new_state);
-                    order_state = new_state;
-                }
-                // only collect blocks if there are open orders
-                if *self.has_yielded_block.read().await && order_state.open == 0 && order_state.processing == 0 {
-                    //info!("No open orders, skipping block collection");
-                } else if self.is_arbitrum() {
-                    // Polling approach for Arbitrum
-                    match provider.get_block_number().await {
-                        Ok(block_number) => {
-                            let current_block = block_number.as_u64();
-                            // Process all blocks from last_block + 1 up to current_block
-                            for block_num in (last_block + 1)..=current_block {
-                                match provider.get_block(block_num).await {
-                                    Ok(Some(block)) => {
-                                        yield NewBlock {
-                                            hash: block.hash.unwrap(),
-                                            number: U64::from(block_num),
-                                            timestamp: block.timestamp,
-                                        };
-                                        *self.has_yielded_block.write().await = true;
-                                    },
-                                    Ok(None) => {
-                                        warn!("Block {} not found.", block_num);
-                                    },
-                                    Err(e) => {
-                                        error!("Error fetching block {}: {}.", block_num, e);
+                if self.is_arbitrum() {
+                    let mut receiver = self.order_state_receiver.lock().await;
+                    // Collect all available messages without blocking
+                    while let Ok(new_state) = receiver.try_recv() {
+                        info!("Received new state: {:?}", new_state);
+                        order_state = new_state;
+                    }
+                    // only collect blocks if there are open orders
+                    if !*self.has_yielded_block.read().await || order_state.open != 0 || order_state.processing != 0 {
+                        // Polling approach for Arbitrum
+                        match provider.get_block_number().await {
+                            Ok(block_number) => {
+                                let current_block = block_number.as_u64();
+                                // Process all blocks from last_block + 1 up to current_block
+                                for block_num in (last_block + 1)..=current_block {
+                                    match provider.get_block(block_num).await {
+                                        Ok(Some(block)) => {
+                                            yield NewBlock {
+                                                hash: block.hash.unwrap(),
+                                                number: U64::from(block_num),
+                                                timestamp: block.timestamp,
+                                            };
+                                            *self.has_yielded_block.write().await = true;
+                                        },
+                                        Ok(None) => {
+                                            warn!("Block {} not found.", block_num);
+                                        },
+                                        Err(e) => {
+                                            error!("Error fetching block {}: {}.", block_num, e);
+                                        }
                                     }
                                 }
+                                last_block = current_block;
+                            },
+                            Err(e) => {
+                                error!("Error fetching latest block number: {}. Retrying...", e);
                             }
-                            last_block = current_block;
-                        },
-                        Err(e) => {
-                            error!("Error fetching latest block number: {}. Retrying...", e);
                         }
                     }
+                    tokio::time::sleep(BLOCK_POLLING_INTERVAL).await;
                 } else {
                     // Existing watch_blocks() approach for other networks
                     // Attempt to watch new blocks
@@ -172,13 +174,4 @@ where
 
         Ok(Box::pin(stream))
     }
-
-    // async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()> {
-    //     match state_change {
-    //         StrategyStateChange::OrderState(order_state) => {
-    //             *self.strategy_order_state.write().await = order_state;
-    //         }
-    //     }
-    //     Ok(())
-    // }
 }

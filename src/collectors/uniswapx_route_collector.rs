@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use alloy_primitives::Uint;
 use anyhow::{anyhow, Result};
+use artemis_core::types::{Collector, CollectorStream};
 use reqwest::header::ORIGIN;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -13,8 +14,6 @@ use futures::lock::Mutex;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
-
-use crate::strategies::types::{Collector, CollectorStream};
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "0.5";

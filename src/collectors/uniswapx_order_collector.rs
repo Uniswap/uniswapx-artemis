@@ -1,4 +1,5 @@
 use anyhow::{Error, Result};
+use artemis_core::types::{Collector, CollectorStream};
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
@@ -8,8 +9,6 @@ use std::str::FromStr;
 use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
-
-use crate::strategies::types::{Collector, CollectorStream};
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_SECS: u64 = 1;
@@ -137,7 +136,7 @@ impl Collector<UniswapXOrderResponse> for UniswapXOrderCollector {
 #[cfg(test)]
 mod tests {
     use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
-    use crate::strategies::types::Collector;
+    use artemis_core::types::Collector;
     use ethers::utils::hex;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};

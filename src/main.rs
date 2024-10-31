@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::{ArgGroup, Parser};
 
-use artemis_core::types::ExecutorMap;
+use artemis_core::engine::Engine;
+use artemis_core::types::{CollectorMap, ExecutorMap};
 use collectors::{
     uniswapx_order_collector::{OrderType, UniswapXOrderCollector},
     block_collector::BlockCollector,
@@ -16,9 +17,8 @@ use executors::queued_executor::QueuedExecutor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
-use engine::Engine;
 use strategies::{
-        types::{Action, Config, Event, CollectorMap},
+        types::{Action, Config, Event},
         uniswapx_strategy::UniswapXUniswapFill,
 };
 use tokio::sync::mpsc::channel;
