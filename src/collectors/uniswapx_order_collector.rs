@@ -9,7 +9,7 @@ use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
-use crate::strategies::types::{Collector, CollectorStream, StrategyStateChange};
+use crate::strategies::types::{Collector, CollectorStream};
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_SECS: u64 = 1;
@@ -131,10 +131,6 @@ impl Collector<UniswapXOrderResponse> for UniswapXOrderCollector {
         });
 
         Ok(Box::pin(stream))
-    }
-
-    async fn handle_state_change(&self, _state_change: StrategyStateChange) -> Result<()> {
-        Ok(())
     }
 }
 

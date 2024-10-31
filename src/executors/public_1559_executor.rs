@@ -150,15 +150,15 @@ where
             .await
             .context("Error getting gas price: {}")?;
 
-        if let Some(gas_bid_info) = action.execution.gas_bid_info {
-            // priority fee at which we'd break even, meaning 100% of profit goes to user in the form of price improvement
-            // TODO: use gas estimate here
-            bid_priority_fee = action
-                .metadata
-                .calculate_priority_fee(gas_bid_info.bid_percentage)
-        } else {
+        // if let Some(gas_bid_info) = action.execution.gas_bid_info {
+        //     // priority fee at which we'd break even, meaning 100% of profit goes to user in the form of price improvement
+        //     // TODO: use gas estimate here
+        //     bid_priority_fee = action
+        //         .metadata
+        //         .calculate_priority_fee(gas_bid_info.bid_percentage)
+        // } else {
             bid_priority_fee = Some(U256::from(50));
-        }
+        // }
 
         let eip1559_tx = action.execution.tx.as_eip1559_mut();
         if let Some(eip1559_tx) = eip1559_tx {

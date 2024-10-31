@@ -159,13 +159,18 @@ async fn main() -> Result<()> {
     // Set up engine.
     let mut engine = Engine::default();
 
-    // Set up block collector.
-    let block_collector = Box::new(BlockCollector::new(provider.clone(), chain_id));
-    let block_collector = CollectorMap::new(block_collector, Event::NewBlock);
-    engine.add_collector(Box::new(block_collector));
-
     let (batch_sender, batch_receiver) = channel(512);
     let (route_sender, route_receiver) = channel(512);
+    let (order_state_sender, order_state_receiver) = channel(512);
+    
+    // Set up block collector.
+    let block_collector = Box::new(BlockCollector::new(
+        provider.clone(), 
+        chain_id,
+        order_state_receiver
+    ));
+    let block_collector = CollectorMap::new(block_collector, Event::NewBlock);
+    engine.add_collector(Box::new(block_collector));
 
     let uniswapx_order_collector = Box::new(UniswapXOrderCollector::new(
         chain_id,
@@ -205,6 +210,7 @@ async fn main() -> Result<()> {
         config.clone(),
         batch_sender,
         route_receiver,
+        order_state_sender,
         args.order_type,
         args.block_time,
         chain_id

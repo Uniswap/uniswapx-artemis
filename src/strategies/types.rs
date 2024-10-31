@@ -86,9 +86,12 @@ pub trait StatefulStrategy<E, A>: Send + Sync {
     /// Process an event, and return an action if needed.
     async fn process_event(&mut self, event: E) -> Option<A>;
     
-    /// Get any state changes since the last check
-    async fn get_state_change(&self) -> Option<StrategyStateChange>;
+    // / Get any state changes since the last check
+    // fn get_state_change_stream(&self) -> StateChangeStream<'_, E>;
 }
+
+/// A stream of events emitted by a [StatefulStrategy](StatefulStrategy).
+pub type StateChangeStream<'a, E> = Pin<Box<dyn Stream<Item = E> + Send + 'a>>;
 
 /// Collector trait, which defines a source of events.
 #[async_trait]
@@ -96,7 +99,7 @@ pub trait Collector<E>: Send + Sync {
     /// Returns the core event stream for the collector.
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
 
-    async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()>;
+    // async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()>;
 }
 
 /// A stream of events emitted by a [Collector](Collector).
@@ -126,9 +129,5 @@ where
         let f = self.f.clone();
         let stream = stream.map(f);
         Ok(Box::pin(stream))
-    }
-
-    async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()> {
-        self.collector.handle_state_change(state_change).await
     }
 }

@@ -5,12 +5,14 @@ use ethers::{
     providers::JsonRpcClient,
     types::{H256, U256, U64},
 };
+use futures::lock::Mutex;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use std::{sync::Arc, time::Duration};
 use tokio_stream::StreamExt;
+use tokio::sync::mpsc::Receiver;
 
-use crate::strategies::{shared::{ARBITRUM_CHAIN_ID, ARBITRUM_TESTNET_CHAIN_ID}, types::{Collector, CollectorStream, OrderState, StrategyStateChange}};
+use crate::strategies::{shared::{ARBITRUM_CHAIN_ID, ARBITRUM_TESTNET_CHAIN_ID}, types::{Collector, CollectorStream, OrderState}};
 
 const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -19,8 +21,8 @@ const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
 pub struct BlockCollector<M> {
     provider: Arc<M>,
     chain_id: u64,
-    strategy_order_state: RwLock<OrderState>,
     has_yielded_block: RwLock<bool>,
+    order_state_receiver: Mutex<Receiver<OrderState>>,
 }
 
 /// A new block event, containing the block number and hash.
@@ -32,12 +34,12 @@ pub struct NewBlock {
 }
 
 impl<M> BlockCollector<M> {
-    pub fn new(provider: Arc<M>, chain_id: u64) -> Self {
+    pub fn new(provider: Arc<M>, chain_id: u64, order_state_receiver: Receiver<OrderState>) -> Self {
         Self { 
             provider, 
-            chain_id, 
-            strategy_order_state: RwLock::new(OrderState::default()), 
-            has_yielded_block: RwLock::new(false) 
+            chain_id,
+            has_yielded_block: RwLock::new(false),
+            order_state_receiver: Mutex::new(order_state_receiver),
         }
     }
 
@@ -74,10 +76,17 @@ where
 
         let stream = async_stream::stream! {
             let mut last_block = start_block;
-
             loop {
+                let mut receiver = self.order_state_receiver.lock().await;
+                let mut order_state = OrderState::default();
+                // Collect all available messages without blocking
+                while let Ok(new_state) = receiver.try_recv() {
+                    // if new_state.open != 0 || new_state.processing != 0 {
+                    // info!("Received new state: {:?}", new_state);
+                    order_state = new_state;
+                }
                 // only collect blocks if there are open orders
-                if *self.has_yielded_block.read().await && self.strategy_order_state.read().await.open == 0 && self.strategy_order_state.read().await.processing == 0 {
+                if *self.has_yielded_block.read().await && order_state.open == 0 && order_state.processing == 0 {
                     //info!("No open orders, skipping block collection");
                 } else if self.is_arbitrum() {
                     // Polling approach for Arbitrum
@@ -164,12 +173,12 @@ where
         Ok(Box::pin(stream))
     }
 
-    async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()> {
-        match state_change {
-            StrategyStateChange::OrderState(order_state) => {
-                *self.strategy_order_state.write().await = order_state;
-            }
-        }
-        Ok(())
-    }
+    // async fn handle_state_change(&self, state_change: StrategyStateChange) -> Result<()> {
+    //     match state_change {
+    //         StrategyStateChange::OrderState(order_state) => {
+    //             *self.strategy_order_state.write().await = order_state;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }

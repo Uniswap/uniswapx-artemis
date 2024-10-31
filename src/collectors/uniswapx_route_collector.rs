@@ -14,7 +14,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 
-use crate::strategies::types::{Collector, CollectorStream, StrategyStateChange};
+use crate::strategies::types::{Collector, CollectorStream};
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "0.5";
@@ -246,10 +246,6 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
         };
 
         Ok(Box::pin(stream))
-    }
-
-    async fn handle_state_change(&self, _state_change: StrategyStateChange) -> Result<()> {
-        Ok(())
     }
 }
 

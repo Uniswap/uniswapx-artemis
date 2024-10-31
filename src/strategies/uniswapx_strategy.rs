@@ -22,7 +22,7 @@ use bindings_uniswapx::shared_types::SignedOrder;
 use dashmap::DashMap;
 use ethers::{
     providers::Middleware,
-    types::{Address, Bytes, Filter, U256},
+    types::{Bytes, U256},
     utils::hex,
 };
 use std::{collections::HashSet, error::Error};
@@ -35,7 +35,7 @@ use tokio::sync::{
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, ResolutionContext, MPS, ResolvableOrder};
 
-use super::types::{Action, Event, OrderState, StrategyStateChange, StatefulStrategy};
+use super::types::{Action, Event, OrderState, StatefulStrategy};
 
 const DONE_EXPIRY: u64 = 300;
 // Base addresses
@@ -97,11 +97,11 @@ pub struct UniswapXUniswapFill<M> {
     done_orders: Arc<DashMap<String, u64>>,
     batch_sender: Sender<Vec<OrderBatchData>>,
     route_receiver: Receiver<RoutedOrder>,
+    order_state_sender: Sender<OrderState>,
     reactor_address: ReactorAddress,
     order_type: OrderType,
     block_time: u64,
     chain_id: u64,
-    last_order_state: RwLock<Option<OrderState>>,
 }
 
 impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
@@ -111,6 +111,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         config: Config,
         sender: Sender<Vec<OrderBatchData>>,
         receiver: Receiver<RoutedOrder>,
+        order_state_sender: Sender<OrderState>,
         order_type: OrderType,
         block_time: u64,
         chain_id: u64,
@@ -134,31 +135,19 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             done_orders: Arc::new(DashMap::new()),
             batch_sender: sender,
             route_receiver: receiver,
+            order_state_sender,
             order_type,
             reactor_address,
             block_time,
             chain_id,
-            last_order_state: RwLock::new(None),
         }
     }
 
-    async fn get_current_order_state(&self) -> OrderState {
+    fn get_current_order_state(&self) -> OrderState {
         OrderState {
             open: self.new_orders.len(),
             processing: self.processing_orders.len(),
             done: self.done_orders.len(),
-        }
-    }
-
-    pub async fn get_current_state_change(&self) -> Option<StrategyStateChange> {
-        let current_state = self.get_current_order_state().await;
-        
-        // If state has changed or this is the first state
-        if self.last_order_state.read().await.as_ref() != Some(&current_state) {
-            *self.last_order_state.write().await = Some(current_state.clone());
-            Some(StrategyStateChange::OrderState(current_state))
-        } else {
-            None
         }
     }
 }
@@ -180,9 +169,16 @@ impl<M: Middleware + 'static> StatefulStrategy<Event, Action> for UniswapXUniswa
         }
     }
 
-    async fn get_state_change(&self) -> Option<StrategyStateChange> {
-        self.get_current_state_change().await
-    }
+    // async fn get_state_change_stream(&self) -> Option<StrategyStateChange> {
+    //     // stream that polls the UniswapX API every 1 second
+    //     let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(
+    //         POLL_INTERVAL_SECS,
+    //     )))
+    //     .then(move |_| {
+    //     });
+
+    //     Ok(Box::pin(stream))
+    // }
 }
 
 impl<M: Middleware + 'static> UniswapXStrategy<M> for UniswapXUniswapFill<M> {}
@@ -227,21 +223,23 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             .map(|order| order.order_hash.clone())
             .collect();
 
-        // Remove orders from new_orders that aren't in the event
-        self.new_orders.retain(|hash, _| event_order_hashes.contains(hash));
+        // Remove orders from tracking and move to done_orders if they aren't in the event
+        let current_timestamp = self.current_timestamp().unwrap() + DONE_EXPIRY;
+        
+        for map in [&self.new_orders, &self.processing_orders] {
+            map.retain(|hash, _| {
+                let keep = event_order_hashes.contains(hash);
+                if !keep {
+                    self.done_orders.insert(hash.clone(), current_timestamp);
+                }
+                keep
+            });
+        }
+
         for event in &event.orders {
             if *self.last_block_timestamp.read().await == 0 {
                 info!(
                     "{} - skipping processing new order event (no timestamp)",
-                    event.order_hash
-                );
-                return None;
-            }
-            if self.new_orders.contains_key(&event.order_hash)
-                || self.processing_orders.contains_key(&event.order_hash)
-            {
-                info!(
-                    "{} - skipping processing new order event (already tracking)",
                     event.order_hash
                 );
                 return None;
@@ -267,12 +265,8 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
 
             match order_status {
                 OrderStatus::Open(resolved) => {
-                    if self.done_orders.contains_key(&order_hash) {
-                        info!(
-                            "{} - New order processing already done, skipping",
-                            order_hash
-                        );
-                        return None;
+                    if self.processing_orders.contains_key(&order_hash) {
+                        continue;
                     }
                     let order_data = OrderData {
                         order,
@@ -318,7 +312,23 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 }
                 OrderStatus::Done => {
                     // info!("{} - Order already done, skipping", order_hash);
+                    if !self.done_orders.contains_key(&order_hash) {
+                        self.processing_orders.remove(&order_hash);
+                        self.done_orders.insert(
+                            order_hash.to_string(),
+                            self.current_timestamp().unwrap() + DONE_EXPIRY,
+                        );
+                    }
                 }
+            }
+        }
+        // send current state to the order state channel
+        let order_state = self.get_current_order_state();
+        // info!("Sending current order state new {}, processing {}, done {}", order_state.open, order_state.processing, order_state.done);
+        match self.order_state_sender.send(order_state).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Failed to send order state: {}", e);
             }
         }
         None
@@ -440,10 +450,10 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             self.done_orders.len()
         );
 
-        // check fills from block logs and remove from processing_orders
-        if let Err(e) = self.handle_fills().await {
-            error!("Error handling fills: {}", e);
-        }
+        // // check fills from block logs and remove from processing_orders
+        // if let Err(e) = self.handle_fills().await {
+        //     error!("Error handling fills: {}", e);
+        // }
 
         self.check_new_orders_for_processing().await;
 
@@ -501,34 +511,6 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             token_in: order_data.resolved.input.token.clone(),
             token_out: order_data.resolved.outputs[0].token.clone(),
         }
-    }
-
-    async fn handle_fills(&self) -> Result<()> {
-        let reactor_address = self.reactor_address.as_str(self.chain_id).parse::<Address>().unwrap();
-        let filter = Filter::new()
-            .select(*self.last_block_number.read().await)
-            .address(reactor_address)
-            .event("Fill(bytes32,address,address,uint256)");
-
-        let logs = self.client.get_logs(&filter).await
-            .unwrap_or_else(|e| {
-                error!("Failed to get logs: {}", e);
-                Vec::new()
-        });
-
-        for log in logs {
-            let order_hash = format!("0x{:x}", log.topics[1]);
-            info!(
-                "{} - Removing filled order from processing_orders",
-                order_hash
-            );
-            self.processing_orders.remove(&order_hash);
-            self.done_orders.insert(
-                order_hash.to_string(),
-                self.current_timestamp()? + DONE_EXPIRY,
-            );
-        }
-        Ok(())
     }
 
     /// The profit of a priority order is calculated a bit differently

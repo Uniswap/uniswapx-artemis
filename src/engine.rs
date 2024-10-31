@@ -4,7 +4,7 @@ use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
 use tracing::{error, info};
 
-use crate::strategies::types::{Collector, StatefulStrategy, StrategyStateChange};
+use crate::strategies::types::{Collector, StatefulStrategy};
 
 /// The main engine of Artemis. This struct is responsible for orchestrating the
 /// data flow between collectors, strategies, and executors.
@@ -88,8 +88,6 @@ where
     pub async fn run(self) -> Result<JoinSet<()>, Box<dyn std::error::Error>> {
         let (event_sender, _): (Sender<E>, _) = broadcast::channel(self.event_channel_capacity);
         let (action_sender, _): (Sender<A>, _) = broadcast::channel(self.action_channel_capacity);
-        let (state_change_sender, _): (Sender<StrategyStateChange>, _) = 
-            broadcast::channel(self.state_change_channel_capacity);
 
         let mut set = JoinSet::new();
 
@@ -114,7 +112,6 @@ where
         for mut strategy in self.strategies {
             let mut event_receiver = event_sender.subscribe();
             let action_sender = action_sender.clone();
-            let state_change_sender = state_change_sender.clone();
             strategy.sync_state().await?;
 
             set.spawn(async move {
@@ -128,12 +125,12 @@ where
                                     Err(e) => error!("error sending action: {}", e),
                                 }
                             }
-                            if let Some(state_change) = strategy.get_state_change().await {
-                                match state_change_sender.send(state_change) {
-                                    Ok(_) => {}
-                                    Err(e) => error!("error sending state change: {}", e),
-                                }
-                            }
+                            // if let Some(state_change) = strategy.get_state_change().await {
+                            //     match state_change_sender.send(state_change) {
+                            //         Ok(_) => {}
+                            //         Err(e) => error!("error sending state change: {}", e),
+                            //     }
+                            // }
                         }
                         Err(e) => error!("error receiving event: {}", e),
                     }
@@ -144,7 +141,6 @@ where
         // Spawn collectors in separate threads.
         for collector in self.collectors {
             let event_sender = event_sender.clone();
-            let mut state_change_receiver = state_change_sender.subscribe();
             set.spawn(async move {
                 info!("starting collector... ");
                 let mut event_stream = collector.get_event_stream().await.unwrap();
@@ -154,16 +150,6 @@ where
                             match event_sender.send(event) {
                                 Ok(_) => {}
                                 Err(e) => error!("error sending event: {}", e),
-                            }
-                        }
-                        result = state_change_receiver.recv() => {
-                            match result {
-                                Ok(state_change) => {
-                                    if let Err(e) = collector.handle_state_change(state_change).await {
-                                        error!("error handling state change: {}", e);
-                                    }
-                                }
-                                Err(e) => error!("error receiving state change: {}", e),
                             }
                         }
                     }
