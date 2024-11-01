@@ -186,6 +186,52 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
     }
 
+    async fn add_new_order(&mut self, order_data: OrderData) {
+        let should_broadcast_update = !self.new_orders.contains_key(&order_data.hash);
+        self.new_orders.insert(order_data.hash.clone(), order_data);
+        if should_broadcast_update {
+            info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+            self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
+        }
+    }
+
+    async fn move_to_processing(&mut self, order_data: OrderData) {
+        if self.processing_orders.contains_key(&order_data.hash) {
+            return;
+        }
+        self.new_orders.remove(&order_data.hash);
+        self.processing_orders.insert(order_data.hash.clone(), order_data);
+    }
+
+    async fn revert_to_new_order(&mut self, order_data: OrderData) {
+        self.processing_orders.remove(&order_data.hash);
+        self.new_orders.insert(order_data.hash.clone(), order_data);
+    }
+
+    async fn move_to_done(&mut self, order_hash: String) {
+        if self.done_orders.contains_key(&order_hash) {
+            return;
+        }
+        self.new_orders.remove(&order_hash);
+        self.processing_orders.remove(&order_hash);
+        self.done_orders.insert(order_hash.clone(), self.current_timestamp().unwrap() + DONE_EXPIRY);
+        info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
+        self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
+    }
+
+    async fn prune_done_orders(&mut self) {
+        info!("Pruning done orders");
+        let mut to_remove = Vec::new();
+        for item in self.done_orders.iter() {
+            if *item.value() < *self.last_block_timestamp.read().await {
+                to_remove.push(item.key().clone());
+            }
+        }
+        for order_hash in to_remove {
+            self.done_orders.remove(&order_hash);
+        }
+    }
+
     fn decode_order(&self, encoded_order: &str) -> Result<Order, Box<dyn Error>> {
         let encoded_order = if let Some(stripped) = encoded_order.strip_prefix("0x") {
             stripped
@@ -206,30 +252,24 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     ///     - skip if we have already processed this order
     ///     - immediately send for execution if order is fillable
     ///     - otherwise add to new_orders to be processed on new block event
-    async fn process_order_event(&self, event: &UniswapXOrderResponse) -> Option<Action> {
+    async fn process_order_event(&mut self, event: &UniswapXOrderResponse) -> Option<Action> {
         // Get set of order hashes from the event
         let event_order_hashes: HashSet<_> = event.orders.iter()
             .map(|order| order.order_hash.clone())
             .collect();
 
-        // Remove orders from tracking and move to done_orders if they aren't in the event
-        let current_timestamp = self.current_timestamp().unwrap() + DONE_EXPIRY;
-        
+        // Remove orders from tracking and move to done_orders if they aren't in the event        
+        let mut dropped_orders = Vec::new();
         for order_list in [&self.new_orders, &self.processing_orders] {
-            let mut dropped_orders = Vec::new();
             for order in order_list.iter() {
                 if !event_order_hashes.contains(&order.hash) {
                     dropped_orders.push(order.hash.clone());
                 }
             }
-            for order_hash in dropped_orders {
-                order_list.remove(&order_hash);
-                self.done_orders.insert(order_hash.clone(), current_timestamp);
-                info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
-                self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
-            }
         }
-
+        for order_hash in dropped_orders {
+            self.move_to_done(order_hash.clone()).await;
+        }
         for event in &event.orders {
             if *self.last_block_timestamp.read().await == 0 {
                 info!(
@@ -244,83 +284,15 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 .map_err(|e| error!("failed to decode: {}", e))
                 .ok()?;
 
-            let order_hash = event.order_hash.clone();
-            let resolved_order = order.resolve(ResolutionContext {
-                block_number: *self.last_block_number.read().await,
-                timestamp: *self.last_block_timestamp.read().await + self.block_time,
-                priority_fee: Uint::from(0),
-            });
-
-            let order_status = match resolved_order {
-                OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
-                OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
-                OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
-            };
-
-            match order_status {
-                OrderStatus::Open(resolved) => {
-                    if self.processing_orders.contains_key(&order_hash) {
-                        continue;
-                    }
-                    let order_data = OrderData {
-                        order,
-                        hash: order_hash.clone(),
-                        signature: event.signature.clone(),
-                        resolved,
-                    };
-                    self.processing_orders
-                        .insert(order_hash.clone(), order_data.clone());
-                    info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
-                    self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
-                    
-                    info!(
-                        "{} - Sending incoming order immediately for routing and execution at block {}",
-                        order_hash,
-                        *self.last_block_number.read().await
-                    );
-                    let order_batch = self.get_order_batch(&order_data);
-                    self.try_send_order_batch(order_batch, order_hash, order_data)
-                        .await;
-                }
-                OrderStatus::NotFillableYet(resolved) => {
-                    if let Order::PriorityOrder(priority_order) = &order {
-                        info!(
-                            "{} - Priority order not fillable yet - last block: {}, target: {}",
-                            order_hash,
-                            *self.last_block_number.read().await,
-                            priority_order.cosignerData.auctionTargetBlock
-                        );
-                    } else {
-                        info!(
-                            "{} - order not fillable yet",
-                            order_hash
-                        );
-                    }
-                    self.new_orders.insert(
-                        order_hash.clone(),
-                        OrderData {
-                            order,
-                            hash: order_hash.clone(),
-                            signature: event.signature.clone(),
-                            resolved,
-                        },
-                    );
-                    info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
-                    self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
-                }
-                OrderStatus::Done => {
-                    // info!("{} - Order already done, skipping", order_hash);
-                    if !self.done_orders.contains_key(&order_hash) {
-                        self.processing_orders.remove(&order_hash);
-                        self.done_orders.insert(
-                            order_hash.to_string(),
-                            self.current_timestamp().unwrap() + DONE_EXPIRY,
-                        );
-
-                        info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
-                        self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
-                    }
-                }
+            if let Err(e) = self
+                .process_new_order(
+                    order,
+                    event.order_hash.clone(),
+                    &event.signature,
+            )
+                .await
+            {
+                error!("Error processing new order: {}", e);
             }
         }
         None
@@ -447,7 +419,10 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         //     error!("Error handling fills: {}", e);
         // }
 
-        self.check_new_orders_for_processing().await;
+        // we don't want to process every block on Arbitrum
+        if self.chain_id != 42161 || event.number.as_u64() % 4 == 0 {
+            self.check_new_orders_for_processing().await;
+        }
 
         if *self.last_block_number.read().await % 100 == 0 {
             self.prune_done_orders().await;
@@ -538,30 +513,52 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         order_hash: String,
         signature: &str,
     ) -> Result<()> {
-        let resolved = order.resolve(ResolutionContext {
+
+        let resolved_order = order.resolve(ResolutionContext {
             block_number: *self.last_block_number.read().await,
             timestamp: *self.last_block_timestamp.read().await + self.block_time,
             priority_fee: Uint::from(0),
         });
-        let order_status = match resolved {
-            OrderResolution::Expired => OrderStatus::Done,
-            OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::NotFillableYet(resolved_order) => {
-                OrderStatus::NotFillableYet(resolved_order)
-            }
-            OrderResolution::Resolved(resolved_order) => OrderStatus::Open(resolved_order),
+
+        let order_status = match resolved_order {
+            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
+            OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
+            OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
         };
 
         match order_status {
-            OrderStatus::Done => {
-                self.new_orders.remove(&order_hash);
-                self.done_orders
-                    .insert(order_hash, self.current_timestamp()? + DONE_EXPIRY);
+            OrderStatus::Open(resolved) => {
+                if self.processing_orders.contains_key(&order_hash) {
+                    return Ok(());
+                }
+                let order_data = OrderData {
+                    order,
+                    hash: order_hash.clone(),
+                    signature: signature.to_string(),
+                    resolved,
+                };
+
+                // Only move to processing if it's a priority order
+                let order_data_clone = order_data.clone();
+                if let Order::PriorityOrder(_priority_order) = &order_data.order {
+                    self.move_to_processing(order_data_clone).await;
+                }
+                else {
+                    self.add_new_order(order_data_clone).await;
+                }
+                info!(
+                    "{} - Sending incoming order immediately for routing and execution at block {}",
+                    order_hash,
+                    *self.last_block_number.read().await
+                );
+                let order_batch: OrderBatchData = self.get_order_batch(&order_data);
+                self.try_send_order_batch(order_batch, order_hash, order_data)
+                    .await;
             }
-            OrderStatus::NotFillableYet(_) => {
+            OrderStatus::NotFillableYet(resolved) => {
                 if let Order::PriorityOrder(priority_order) = &order {
                     info!(
-                        "{} - Order not fillable yet at latest block: {}; target: {}",
+                        "{} - Priority order not fillable yet - last block: {}, target: {}",
                         order_hash,
                         *self.last_block_number.read().await,
                         priority_order.cosignerData.auctionTargetBlock
@@ -572,42 +569,22 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                         order_hash
                     );
                 }
-            }
-            OrderStatus::Open(resolved_order) => {
-                let order_data = OrderData {
+                self.add_new_order(
+                OrderData {
                     order,
-                    hash: order_hash.to_string(),
+                    hash: order_hash.clone(),
                     signature: signature.to_string(),
-                    resolved: resolved_order,
-                };
-                self.new_orders.remove(&order_hash);
-                self.processing_orders
-                    .insert(order_hash.to_string(), order_data.clone());
-                info!(
-                    "{} - Sending order for routing and execution at latest block {}",
-                    order_hash,
-                    *self.last_block_number.read().await
-                );
-                let order_batch = self.get_order_batch(&order_data);
-                self.try_send_order_batch(order_batch, order_hash, order_data)
-                    .await;
+                    resolved,
+                    },
+                ).await;
+            }
+            OrderStatus::Done => {
+                // info!("{} - Order already done, skipping", order_hash);
+                self.move_to_done(order_hash).await;
             }
         }
 
         Ok(())
-    }
-
-    async fn prune_done_orders(&mut self) {
-        info!("Pruning done orders");
-        let mut to_remove = Vec::new();
-        for item in self.done_orders.iter() {
-            if *item.value() < *self.last_block_timestamp.read().await {
-                to_remove.push(item.key().clone());
-            }
-        }
-        for order_hash in to_remove {
-            self.done_orders.remove(&order_hash);
-        }
     }
 
     /// check all new orders we are tracking
@@ -649,7 +626,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
     }
 
     async fn try_send_order_batch(
-        &self,
+        &mut self,
         order_batch: OrderBatchData,
         order_hash: String,
         order_data: OrderData,
@@ -661,10 +638,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                     "{} - Failed to send batch: {}; moving order back to new_orders",
                     order_hash, e
                 );
-                self.processing_orders.remove(&order_hash);
-                self.new_orders.insert(order_hash.clone(), order_data);
-                info!("Sending current order state new {}, processing {}, done {}", self.get_current_order_state().open, self.get_current_order_state().processing, self.get_current_order_state().done);
-                self.order_state_sender.send(self.get_current_order_state()).await.unwrap();
+                self.revert_to_new_order(order_data).await;
             }
         }
     }

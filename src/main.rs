@@ -29,9 +29,6 @@ pub mod aws_utils;
 pub mod collectors;
 pub mod executors;
 pub mod strategies;
-pub mod engine;
-
-const MEV_BLOCKER: &str = "https://rpc.mevblocker.io/noreverts";
 
 /// CLI Options.
 #[derive(Parser, Debug)]
@@ -48,6 +45,10 @@ pub struct Args {
     /// Ethereum node HTTP endpoint.
     #[arg(long, required = true)]
     pub http: String,
+
+    /// MevBlocker HTTP endpoint
+    #[arg(long, required = false)]
+    pub mevblocker_http: Option<String>,
 
     /// Private key for sending txs.
     #[arg(long, group = "key_source")]
@@ -113,8 +114,13 @@ async fn main() -> Result<()> {
     let provider =
         Provider::<Http>::try_from(args.http).expect("could not instantiate HTTP Provider");
 
-    let mevblocker_provider =
-        Provider::<Http>::try_from(MEV_BLOCKER).expect("could not instantiate MevBlocker Provider");
+    let mevblocker_provider;
+    if let Some(mevblocker_http) = args.mevblocker_http {
+        mevblocker_provider =
+            Provider::<Http>::try_from(mevblocker_http).expect("could not instantiate MevBlocker Provider");
+    } else {
+        mevblocker_provider = provider.clone();
+    }
 
     let mut key_store = Arc::new(KeyStore::new());
 

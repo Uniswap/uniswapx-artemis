@@ -111,6 +111,14 @@ where
                                             error!("Error fetching block {}: {}.", block_num, e);
                                         }
                                     }
+                                    // Ensure there are still orders to process
+                                    while let Ok(new_state) = receiver.try_recv() {
+                                        info!("Received new state: {:?}", new_state);
+                                        order_state = new_state;
+                                    }
+                                    if order_state.open == 0 && order_state.processing == 0 {
+                                        break;
+                                    }
                                 }
                                 last_block = current_block;
                             },

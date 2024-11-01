@@ -80,7 +80,7 @@ where
         info!("Gas Usage {:?}", gas_usage_result);
         let gas_usage = gas_usage_result;
 
-        let bid_gas_price;
+        let mut bid_gas_price;
         if let Some(gas_bid_info) = action.gas_bid_info {
             // gas price at which we'd break even, meaning 100% of profit goes to validator
             let breakeven_gas_price = gas_bid_info.total_profit / gas_usage;
@@ -95,6 +95,8 @@ where
                 .await
                 .map_err(|err| anyhow::anyhow!("Error getting gas price: {}", err))?;
         }
+        info!("bid_gas_price: {}", bid_gas_price);
+        bid_gas_price = U256::from_dec_str("10000000").unwrap();
         action.tx.set_gas_price(bid_gas_price);
 
         let sender_client = self.sender_client.clone();
