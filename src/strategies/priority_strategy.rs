@@ -137,11 +137,14 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXPriorityFill<M
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
-    async fn process_event(&mut self, event: Event) -> Option<Action> {
+    async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::UniswapXOrder(order) => self.process_order_event(&order).await,
-            Event::NewBlock(block) => self.process_new_block_event(&block).await,
-            Event::UniswapXRoute(route) => self.process_new_route(&route).await,
+            Event::UniswapXOrder(order) => self.process_order_event(&order).await
+                .map_or(vec![], |action| vec![action]),
+            Event::NewBlock(block) => self.process_new_block_event(&block).await
+                .map_or(vec![], |action| vec![action]),
+            Event::UniswapXRoute(route) => self.process_new_route(&route).await
+                .map_or(vec![], |action| vec![action]),
         }
     }
 }
@@ -229,6 +232,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                     hash: order_hash.clone(),
                     signature: event.signature.clone(),
                     resolved,
+                    encoded_order: None,
                 };
                 self.processing_orders
                     .insert(order_hash.clone(), order_data.clone());
@@ -256,6 +260,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                         hash: order_hash.clone(),
                         signature: event.signature.clone(),
                         resolved,
+                        encoded_order: None,
                     },
                 );
             }
@@ -508,6 +513,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                     hash: order_hash.to_string(),
                     signature: signature.to_string(),
                     resolved: resolved_order,
+                    encoded_order: None,
                 };
                 self.new_orders.remove(&order_hash);
                 self.processing_orders

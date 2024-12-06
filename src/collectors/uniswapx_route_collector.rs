@@ -22,6 +22,7 @@ const DEADLINE: u64 = 1000;
 #[derive(Debug, Clone)]
 pub struct OrderData {
     pub order: Order,
+    pub encoded_order: Option<String>,
     pub hash: String,
     pub signature: String,
     pub resolved: ResolvedOrder,

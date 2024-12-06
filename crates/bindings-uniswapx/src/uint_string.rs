@@ -46,13 +46,13 @@ pub mod uint_string {
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`V`7`\x0B\x82\x82\x829\x80Q`\0\x1A`s\x14`*WcNH{q`\xE0\x1B`\0R`\0`\x04R`$`\0\xFD[0`\0R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xC4\xC7\xB8\\\x10\xF3]\xE4@\x9C\xF4<\x86\xD2b:\xCD}\xE5\xBE\x0B\xCD0\xB5\x07\xDB\x9F\x1C\xC0\xD6\xE3sdsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`U`2`\x0B\x82\x82\x829\x80Q_\x1A`s\x14`&WcNH{q`\xE0\x1B_R_`\x04R`$_\xFD[0_R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \x1A\xB2\xA2\x13B1\xD3\xA4\x89\x97|o\xA5\xB8\xDD\x18z\xFF\xCC\xD9V\xD0\x88\x0E\x04ZK\xD6\x03\x1Fo)dsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
     pub static UINTSTRING_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R`\0\x80\xFD\xFE\xA2dipfsX\"\x12 \xC4\xC7\xB8\\\x10\xF3]\xE4@\x9C\xF4<\x86\xD2b:\xCD}\xE5\xBE\x0B\xCD0\xB5\x07\xDB\x9F\x1C\xC0\xD6\xE3sdsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \x1A\xB2\xA2\x13B1\xD3\xA4\x89\x97|o\xA5\xB8\xDD\x18z\xFF\xCC\xD9V\xD0\x88\x0E\x04ZK\xD6\x03\x1Fo)dsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
     pub static UINTSTRING_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,

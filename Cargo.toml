@@ -9,7 +9,7 @@ edition = "2021"
 uniswapx-rs = { path = "./crates/uniswapx-rs" }
 bindings-uniswapx = { path = "./crates/bindings-uniswapx" }
 
-artemis-core = { git = "https://github.com/paradigmxyz/artemis"}
+artemis-core = { git = "https://github.com/paradigmxyz/artemis#70f3bce3488cf29f34197b9b2c0c02d329b95793"}
 ethers = { version = "2", features = ["ws", "rustls"]}
 tokio = { version = "1.18", features = ["full"] }
 dotenv = "0.15.0"

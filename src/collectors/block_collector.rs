@@ -10,7 +10,7 @@ use tokio::time::sleep;
 use std::{sync::Arc, time::Duration};
 use tracing::{error, info, warn};
 
-const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(200);
+const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A collector that listens for new blocks, and generates a stream of
 /// [events](NewBlock) which contain the block number and hash.

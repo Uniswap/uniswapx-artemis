@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::keystore::KeyStore;
 use strategies::priority_strategy::UniswapXPriorityFill;
+use strategies::dutchv3_strategy::UniswapXDutchV3Fill;
 use strategies::{
     types::{Action, Config, Event},
     uniswapx_strategy::UniswapXUniswapFill,
@@ -48,6 +49,10 @@ pub struct Args {
     /// Ethereum node HTTP endpoint.
     #[arg(long, required = true)]
     pub http: String,
+
+    /// MevBlocker HTTP endpoint
+    #[arg(long, required = false)]
+    pub mevblocker_http: Option<String>,
 
     /// Private key for sending txs.
     #[arg(long, group = "key_source")]
@@ -109,8 +114,13 @@ async fn main() -> Result<()> {
     let provider =
         Provider::<Http>::try_from(args.http).expect("could not instantiate HTTP Provider");
 
-    let mevblocker_provider =
-        Provider::<Http>::try_from(MEV_BLOCKER).expect("could not instantiate MevBlocker Provider");
+    let mevblocker_provider;
+    if let Some(mevblocker_http) = args.mevblocker_http {
+        mevblocker_provider =
+            Provider::<Http>::try_from(mevblocker_http).expect("could not instantiate MevBlocker Provider");
+    } else {
+        mevblocker_provider = Provider::<Http>::try_from(MEV_BLOCKER).expect("could not instantiate MevBlocker Provider");
+    }
 
     let mut key_store = Arc::new(KeyStore::new());
 
@@ -198,6 +208,15 @@ async fn main() -> Result<()> {
     match &args.order_type {
         OrderType::DutchV2 => {
             let uniswapx_strategy = UniswapXUniswapFill::new(
+                Arc::new(provider.clone()),
+                config.clone(),
+                batch_sender,
+                route_receiver,
+            );
+            engine.add_strategy(Box::new(uniswapx_strategy));
+        }
+        OrderType::DutchV3 => {
+            let uniswapx_strategy = UniswapXDutchV3Fill::new(
                 Arc::new(provider.clone()),
                 config.clone(),
                 batch_sender,

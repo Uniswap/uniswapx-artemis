@@ -95,6 +95,7 @@ where
                 .await
                 .map_err(|err| anyhow::anyhow!("Error getting gas price: {}", err))?;
         }
+        info!("bid_gas_price: {}", bid_gas_price);
         action.tx.set_gas_price(bid_gas_price);
 
         let sender_client = self.sender_client.clone();
