@@ -65,6 +65,15 @@ impl KeyStore {
         );
     }
 
+    // Gets the first key address in the store
+    pub fn get_address(&self) -> Option<String> {
+        if self.keys.len() == 0 {
+            return None;
+        }
+        let public_address = self.keys.keys().next().unwrap();
+        Some(public_address.clone())
+    }
+
     pub async fn acquire_key(&self) -> Result<(String, PrivateKey), KeyStoreError> {
         loop {
             for (public_address, key_mutex) in &self.keys {

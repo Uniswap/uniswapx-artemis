@@ -1,4 +1,4 @@
-pub use bytes_lib::*;
+pub use math_ext::*;
 /// This module was auto-generated with ethers-rs Abigen.
 /// More information at: <https://github.com/gakonst/ethers-rs>
 #[allow(
@@ -9,7 +9,7 @@ pub use bytes_lib::*;
     dead_code,
     non_camel_case_types,
 )]
-pub mod bytes_lib {
+pub mod math_ext {
     #[allow(deprecated)]
     fn __abi() -> ::ethers::core::abi::Abi {
         ::ethers::core::abi::ethabi::Contract {
@@ -22,44 +22,44 @@ pub mod bytes_lib {
         }
     }
     ///The parsed JSON ABI of the contract.
-    pub static BYTESLIB_ABI: ::ethers::contract::Lazy<::ethers::core::abi::Abi> = ::ethers::contract::Lazy::new(
+    pub static MATHEXT_ABI: ::ethers::contract::Lazy<::ethers::core::abi::Abi> = ::ethers::contract::Lazy::new(
         __abi,
     );
     #[rustfmt::skip]
-    const __BYTECODE: &[u8] = b"`U`2`\x0B\x82\x82\x829\x80Q_\x1A`s\x14`&WcNH{q`\xE0\x1B_R_`\x04R`$_\xFD[0_R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \xD3P\xB1\xA9L@Z\x9B\xCB\x07\xC7\xD30)r\x99\xDA\xC2\xC2\x11,\xCD\xE7\xAB\x1F\xC6X\x1EE5r\xA9dsolcC\0\x08\x18\x003";
+    const __BYTECODE: &[u8] = b"`U`2`\x0B\x82\x82\x829\x80Q_\x1A`s\x14`&WcNH{q`\xE0\x1B_R_`\x04R`$_\xFD[0_R`s\x81S\x82\x81\xF3\xFEs\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \xA6\x87\xAD\xCF\x95\x1D\xB7\x18TG=3)S\xDC\xC6\xDB\xA5\xAFw\xAC\x8E\x86&\x9E\x86?#4\xDCP\x82dsolcC\0\x08\x18\x003";
     /// The bytecode of the contract.
-    pub static BYTESLIB_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static MATHEXT_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __BYTECODE,
     );
     #[rustfmt::skip]
-    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \xD3P\xB1\xA9L@Z\x9B\xCB\x07\xC7\xD30)r\x99\xDA\xC2\xC2\x11,\xCD\xE7\xAB\x1F\xC6X\x1EE5r\xA9dsolcC\0\x08\x18\x003";
+    const __DEPLOYED_BYTECODE: &[u8] = b"s\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x000\x14`\x80`@R_\x80\xFD\xFE\xA2dipfsX\"\x12 \xA6\x87\xAD\xCF\x95\x1D\xB7\x18TG=3)S\xDC\xC6\xDB\xA5\xAFw\xAC\x8E\x86&\x9E\x86?#4\xDCP\x82dsolcC\0\x08\x18\x003";
     /// The deployed bytecode of the contract.
-    pub static BYTESLIB_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
+    pub static MATHEXT_DEPLOYED_BYTECODE: ::ethers::core::types::Bytes = ::ethers::core::types::Bytes::from_static(
         __DEPLOYED_BYTECODE,
     );
-    pub struct BytesLib<M>(::ethers::contract::Contract<M>);
-    impl<M> ::core::clone::Clone for BytesLib<M> {
+    pub struct MathExt<M>(::ethers::contract::Contract<M>);
+    impl<M> ::core::clone::Clone for MathExt<M> {
         fn clone(&self) -> Self {
             Self(::core::clone::Clone::clone(&self.0))
         }
     }
-    impl<M> ::core::ops::Deref for BytesLib<M> {
+    impl<M> ::core::ops::Deref for MathExt<M> {
         type Target = ::ethers::contract::Contract<M>;
         fn deref(&self) -> &Self::Target {
             &self.0
         }
     }
-    impl<M> ::core::ops::DerefMut for BytesLib<M> {
+    impl<M> ::core::ops::DerefMut for MathExt<M> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
     }
-    impl<M> ::core::fmt::Debug for BytesLib<M> {
+    impl<M> ::core::fmt::Debug for MathExt<M> {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            f.debug_tuple(::core::stringify!(BytesLib)).field(&self.address()).finish()
+            f.debug_tuple(::core::stringify!(MathExt)).field(&self.address()).finish()
         }
     }
-    impl<M: ::ethers::providers::Middleware> BytesLib<M> {
+    impl<M: ::ethers::providers::Middleware> MathExt<M> {
         /// Creates a new contract instance with the specified `ethers` client at
         /// `address`. The contract derefs to a `ethers::Contract` object.
         pub fn new<T: Into<::ethers::core::types::Address>>(
@@ -69,7 +69,7 @@ pub mod bytes_lib {
             Self(
                 ::ethers::contract::Contract::new(
                     address.into(),
-                    BYTESLIB_ABI.clone(),
+                    MATHEXT_ABI.clone(),
                     client,
                 ),
             )
@@ -105,8 +105,8 @@ pub mod bytes_lib {
             ::ethers::contract::ContractError<M>,
         > {
             let factory = ::ethers::contract::ContractFactory::new(
-                BYTESLIB_ABI.clone(),
-                BYTESLIB_BYTECODE.clone().into(),
+                MATHEXT_ABI.clone(),
+                MATHEXT_BYTECODE.clone().into(),
                 client,
             );
             let deployer = factory.deploy(constructor_args)?;
@@ -115,7 +115,7 @@ pub mod bytes_lib {
         }
     }
     impl<M: ::ethers::providers::Middleware> From<::ethers::contract::Contract<M>>
-    for BytesLib<M> {
+    for MathExt<M> {
         fn from(contract: ::ethers::contract::Contract<M>) -> Self {
             Self::new(contract.address(), contract.client())
         }

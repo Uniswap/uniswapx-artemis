@@ -1,8 +1,8 @@
-use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use alloy_primitives::Uint;
 use anyhow::{anyhow, Result};
-use aws_sdk_cloudwatch::{config::http::HttpResponse, error::SdkError, operation::put_metric_data::{PutMetricDataError, PutMetricDataOutput}, Client as CloudWatchClient};
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use reqwest::header::ORIGIN;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -16,7 +16,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 
-use crate::{aws_utils::cloudwatch_utils::{CwMetrics, DimensionName, DimensionValue, MetricBuilder, MetricSender, ARTEMIS_NAMESPACE}, shared::send_metric_with_order_hash};
+use crate::{aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue}, shared::send_metric_with_order_hash};
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "2.5";
@@ -25,6 +25,7 @@ const DEADLINE: u64 = 1000;
 #[derive(Debug, Clone)]
 pub struct OrderData {
     pub order: Order,
+    pub encoded_order: Option<String>,
     pub hash: String,
     pub signature: String,
     pub resolved: ResolvedOrder,
@@ -204,7 +205,7 @@ impl UniswapXRouteCollector {
             .map_err(|e| anyhow!("Quote request failed with error: {}", e))?;
 
         let elapsed = start.elapsed();
-        let metric_future = self.build_metric_future(DimensionValue::Router02, CwMetrics::RoutingMs, elapsed.as_millis() as f64);
+        let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::Router02, CwMetrics::RoutingMs, elapsed.as_millis() as f64);
         if let Some(metric_future) = metric_future {
             send_metric_with_order_hash!(&Arc::new(""), metric_future);
         }
@@ -226,31 +227,6 @@ impl UniswapXRouteCollector {
                 response.status()
             )),
         }
-    }
-}
-
-impl MetricSender for UniswapXRouteCollector {
-    fn build_metric_future(&self, dimension_value: DimensionValue, metric: CwMetrics, value: f64) -> 
-    Option<Pin<Box<impl Future<Output = Result<PutMetricDataOutput, SdkError<PutMetricDataError, HttpResponse>>> + Send + 'static>>> {
-        let cw = self.cloudwatch_client.clone();
-        cw.map(|client| {
-            Box::pin(async move {
-                client
-                .put_metric_data()
-                .namespace(ARTEMIS_NAMESPACE)
-                .metric_data(
-                    MetricBuilder::new(metric)
-                        .add_dimension(
-                            DimensionName::Service.as_ref(),
-                            dimension_value.as_ref(),
-                        )
-                        .with_value(value)
-                        .build(),
-                )
-                .send()
-                .await
-            })
-        })
     }
 }
 

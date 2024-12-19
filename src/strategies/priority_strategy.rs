@@ -229,6 +229,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                     hash: order_hash.clone(),
                     signature: event.signature.clone(),
                     resolved,
+                    encoded_order: None,
                 };
                 self.processing_orders
                     .insert(order_hash.clone(), order_data.clone());
@@ -256,6 +257,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                         hash: order_hash.clone(),
                         signature: event.signature.clone(),
                         resolved,
+                        encoded_order: None,
                     },
                 );
             }
@@ -508,6 +510,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                     hash: order_hash.to_string(),
                     signature: signature.to_string(),
                     resolved: resolved_order,
+                    encoded_order: None,
                 };
                 self.new_orders.remove(&order_hash);
                 self.processing_orders

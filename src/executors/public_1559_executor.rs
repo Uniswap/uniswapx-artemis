@@ -1,11 +1,11 @@
 use serde_json::Value;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use anyhow::{Context, Result};
 use artemis_core::types::Executor;
 use async_trait::async_trait;
-use aws_sdk_cloudwatch::{config::http::HttpResponse, error::SdkError, operation::put_metric_data::{PutMetricDataError, PutMetricDataOutput}, Client as CloudWatchClient};
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use ethers::{
     middleware::MiddlewareBuilder,
     providers::{Middleware, MiddlewareError},
@@ -16,20 +16,10 @@ use ethers::{
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        receipt_status_to_metric, CwMetrics, DimensionName, DimensionValue, MetricBuilder, MetricSender, ARTEMIS_NAMESPACE
-    }, executors::reactor_error_code::ReactorErrorCode, strategies::{keystore::KeyStore, types::SubmitTxToMempoolWithExecutionMetadata}
+        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue
+    }, executors::reactor_error_code::ReactorErrorCode, shared::send_metric_with_order_hash, strategies::{keystore::KeyStore, types::SubmitTxToMempoolWithExecutionMetadata}
+    
 };
-
-macro_rules! send_metric_with_order_hash {
-    ($order_hash: expr, $future: expr) => {
-        let hash = Arc::clone($order_hash);
-        tokio::spawn(async move {
-            if let Err(e) = $future.await {
-                warn!("{} - error sending metric: {:?}", hash, e);
-            }
-        })
-    };
-}
 
 /// An executor that sends transactions to the public mempool.
 pub struct Public1559Executor<M, N> {
@@ -67,7 +57,7 @@ where
     async fn execute(&self, mut action: SubmitTxToMempoolWithExecutionMetadata) -> Result<()> {
         let order_hash = Arc::new(action.metadata.order_hash.clone());
 
-        let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, CwMetrics::ExecutionAttempted, 1.0);
+        let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, CwMetrics::ExecutionAttempted, 1.0);
         if let Some(metric_future) = metric_future {
             send_metric_with_order_hash!(&order_hash, metric_future);
         }
@@ -114,7 +104,7 @@ where
                     match error_code {
                         ReactorErrorCode::OrderAlreadyFilled => {
                             info!("{} - Order already filled, skipping execution", order_hash);
-                            let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, CwMetrics::ExecutionSkippedAlreadyFilled, 1.0);
+                            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, CwMetrics::ExecutionSkippedAlreadyFilled, 1.0);
                             if let Some(metric_future) = metric_future {
                                 send_metric_with_order_hash!(&order_hash, metric_future);
                             }
@@ -122,7 +112,7 @@ where
                         }
                         ReactorErrorCode::InvalidDeadline => {
                             info!("{} - Order past deadline, skipping execution", order_hash);
-                            let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, CwMetrics::ExecutionSkippedPastDeadline, 1.0);
+                            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, CwMetrics::ExecutionSkippedPastDeadline, 1.0);
                             if let Some(metric_future) = metric_future {
                                 send_metric_with_order_hash!(&order_hash, metric_future);
                             }
@@ -186,7 +176,7 @@ where
         let signer = nonce_manager.with_signer(wallet);
 
         info!("{} - Executing tx from {:?}", order_hash, address);
-        let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, CwMetrics::TxSubmitted, 1.0);
+        let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, CwMetrics::TxSubmitted, 1.0);
         if let Some(metric_future) = metric_future {
             // do not block current thread by awaiting in the background
             send_metric_with_order_hash!(&order_hash, metric_future);
@@ -237,7 +227,7 @@ where
         // post key-release processing
         // TODO: parse revert reason
         if let Some(_) = &self.cloudwatch_client {
-            let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, receipt_status_to_metric(status.as_u64()), 1.0);
+            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, receipt_status_to_metric(status.as_u64()), 1.0);
             if let Some(metric_future) = metric_future {
                 // do not block current thread by awaiting in the background
                 send_metric_with_order_hash!(&order_hash, metric_future);
@@ -264,42 +254,13 @@ where
                     balance_eth.clone(),
                     block_number.as_u64()
                 );
-                let metric_future = self.build_metric_future(DimensionValue::PriorityExecutor, CwMetrics::Balance(format!("{:?}", address)), balance_eth.parse::<f64>().unwrap_or(0.0));
+                let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::PriorityExecutor, CwMetrics::Balance(format!("{:?}", address)), balance_eth.parse::<f64>().unwrap_or(0.0));
                 if let Some(metric_future) = metric_future {
-                    tokio::spawn(async move {
-                        if let Err(e) = metric_future.await {
-                            warn!("{} - error sending metric: {:?}", order_hash, e);
-                        }
-                    });
+                    send_metric_with_order_hash!(&order_hash, metric_future);
                 }
             }
         }
 
         Ok(())
-    }
-}
-
-impl<M, N> MetricSender for Public1559Executor<M, N> {
-    fn build_metric_future(&self, dimension_value: DimensionValue, metric: CwMetrics, value: f64) 
-    -> Option<Pin<Box<impl Future<Output = Result<PutMetricDataOutput, SdkError<PutMetricDataError, HttpResponse>>> + Send + 'static>>> {
-        let cw = self.cloudwatch_client.clone();
-        cw.map(|client| {
-            Box::pin(async move {
-                client
-                .put_metric_data()
-                .namespace(ARTEMIS_NAMESPACE)
-                .metric_data(
-                    MetricBuilder::new(metric)
-                        .add_dimension(
-                            DimensionName::Service.as_ref(),
-                            dimension_value.as_ref(),
-                        )
-                        .with_value(value)
-                        .build(),
-                )
-                .send()
-                .await
-            })
-        })
     }
 }

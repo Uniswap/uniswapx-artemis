@@ -1,3 +1,4 @@
+pub mod dutchv3_strategy;
 pub mod keystore;
 pub mod priority_strategy;
 pub mod shared;

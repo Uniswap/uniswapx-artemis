@@ -1,12 +1,14 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use aws_sdk_cloudwatch::{config::http::HttpResponse, error::SdkError, operation::put_metric_data::{PutMetricDataError, PutMetricDataOutput}, types::Dimension};
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
 
 /// Constants for dimension names and values
 pub const SERVICE_DIMENSION: &str = "Service";
 pub const ROUTER02: &str = "Router02";
 pub const PRIORITY_EXECUTOR: &str = "PriorityExecutor";
 pub const V2_EXECUTOR: &str = "V2Executor";
+pub const V3_EXECUTOR: &str = "V3Executor";
 
 /// Constants for metric names
 pub const ROUTING_MS: &str = "RoutingMs";
@@ -42,6 +44,7 @@ impl From<DimensionName> for String {
 pub enum DimensionValue {
     PriorityExecutor,
     V2Executor,
+    V3Executor,
     Router02,
 }
 impl From<DimensionValue> for String {
@@ -49,6 +52,7 @@ impl From<DimensionValue> for String {
         match value {
             DimensionValue::PriorityExecutor => PRIORITY_EXECUTOR.to_string(),
             DimensionValue::V2Executor => V2_EXECUTOR.to_string(),
+            DimensionValue::V3Executor => V3_EXECUTOR.to_string(),
             DimensionValue::Router02 => ROUTER02.to_string(),
         }
     }
@@ -59,6 +63,7 @@ impl AsRef<str> for DimensionValue {
         match self {
             DimensionValue::PriorityExecutor => PRIORITY_EXECUTOR,
             DimensionValue::V2Executor => V2_EXECUTOR,
+            DimensionValue::V3Executor => V3_EXECUTOR,
             DimensionValue::Router02 => ROUTER02,
         }
     }
@@ -151,7 +156,47 @@ pub fn receipt_status_to_metric(status: u64) -> CwMetrics {
     }
 }
 
-pub trait MetricSender {
-    fn build_metric_future(&self, dimension_value: DimensionValue, metric: CwMetrics, value: f64) -> 
-    Option<Pin<Box<impl Future<Output = Result<PutMetricDataOutput, SdkError<PutMetricDataError, HttpResponse>>> + Send + 'static>>>;
+pub fn build_metric_future(cloudwatch_client: Option<Arc<CloudWatchClient>>, dimension_value: DimensionValue, metric: CwMetrics, value: f64) 
+    -> Option<Pin<Box<impl Future<Output = Result<PutMetricDataOutput, SdkError<PutMetricDataError, HttpResponse>>> + Send + 'static>>> {
+        cloudwatch_client.map(|client| {
+            Box::pin(async move {
+                client
+                .put_metric_data()
+                .namespace(ARTEMIS_NAMESPACE)
+                .metric_data(
+                    MetricBuilder::new(metric)
+                        .add_dimension(
+                            DimensionName::Service.as_ref(),
+                            dimension_value.as_ref(),
+                        )
+                        .with_value(value)
+                        .build(),
+                )
+                .send()
+                .await
+            })
+    })
+}
+
+#[macro_export]
+macro_rules! send_metric_with_order_hash {
+    ($order_hash: expr, $future: expr) => {
+        let hash = Arc::clone($order_hash);
+        tokio::spawn(async move {
+            if let Err(e) = $future.await {
+                warn!("{} - error sending metric: {:?}", hash, e);
+            }
+        })
+    };
+}
+
+#[macro_export]
+macro_rules! send_metric {
+    ($future: expr) => {
+        tokio::spawn(async move {
+            if let Err(e) = $future.await {
+                warn!("error sending metric: {:?}", e);
+            }
+        })
+    };
 }
