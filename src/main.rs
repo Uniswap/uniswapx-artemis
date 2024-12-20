@@ -34,8 +34,6 @@ pub mod executors;
 pub mod strategies;
 pub mod shared;
 
-const MEV_BLOCKER: &str = "https://rpc.mevblocker.io/noreverts";
-
 /// CLI Options.
 #[derive(Parser, Debug)]
 #[command(group(
@@ -114,14 +112,14 @@ async fn main() -> Result<()> {
     // Set up ethers provider.
     let chain_id = args.chain_id;
     let provider =
-        Provider::<Http>::try_from(args.http).expect("could not instantiate HTTP Provider");
+        Provider::<Http>::try_from(args.http.as_str()).expect("could not instantiate HTTP Provider");
 
     let mevblocker_provider;
     if let Some(mevblocker_http) = args.mevblocker_http {
         mevblocker_provider = Provider::<Http>::try_from(mevblocker_http)
             .expect("could not instantiate MevBlocker Provider");
     } else {
-        mevblocker_provider = Provider::<Http>::try_from(MEV_BLOCKER)
+        mevblocker_provider = Provider::<Http>::try_from(args.http.as_str())
             .expect("could not instantiate MevBlocker Provider");
     }
 
