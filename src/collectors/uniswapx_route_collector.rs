@@ -183,7 +183,9 @@ impl UniswapXRouteCollector {
         }
     }
 
-    pub fn has_native_route(
+    /// Fetches the route for a token to native currency
+    /// uses quickroutes
+    pub fn fetch_native_route(
         &self,
         chain_id: u64,
         token_in: String,
@@ -242,8 +244,8 @@ impl UniswapXRouteCollector {
                 .header(ORIGIN, "https://app.uniswap.org")
                 .header("accept", "application/json")
                 .send(),
-            self.has_native_route(params.chain_id, params.token_in.clone()),
-            self.has_native_route(params.chain_id, params.token_out.clone())
+            self.fetch_native_route(params.chain_id, params.token_in.clone()),
+            self.fetch_native_route(params.chain_id, params.token_out.clone())
         );
 
         // Check results from all dependency futures
@@ -253,16 +255,36 @@ impl UniswapXRouteCollector {
         ];
 
         for (request_type, result) in dependent_futures {
-            result.map_err(|e| {
-                anyhow!(
-                    "{} - [Quickroutes] {} failed with error: {}",
-                    order_hash,
-                    request_type,
-                    e
-                )
-            })?;
+            match result {
+                Ok(response) => {
+                    match response.status() {
+                        // Noop
+                        StatusCode::OK => {}
+                        _ => {
+                            error!(
+                                "{} - [Quickroutes] {} failed with status code: {}",
+                                order_hash,
+                                request_type,
+                                response.status()
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "{} - [Quickroutes] {} failed with error: {}",
+                        order_hash,
+                        request_type,
+                        e
+                    );
+                }
+            }
         }
 
+        if let Err(e) = routing_result {
+            error!("{} - Routing request failed with error: {}", order_hash, e);
+            return Err(anyhow!("{} - Routing request failed with error: {}", order_hash, e));
+        }
         let routing_response = routing_result.unwrap();
 
         let elapsed = start.elapsed();
