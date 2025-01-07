@@ -1,14 +1,15 @@
+use serde_json::Value;
 use std::{
     ops::{Div, Mul},
     sync::Arc,
 };
-use serde_json::Value;
 use tracing::{info, warn};
 
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::SubmitTxToMempool;
 use artemis_core::types::Executor;
 use async_trait::async_trait;
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use ethers::{
     middleware::MiddlewareBuilder,
     providers::{Middleware, MiddlewareError},
@@ -16,12 +17,14 @@ use ethers::{
     types::{TransactionReceipt, U256},
     utils::format_units,
 };
-use aws_sdk_cloudwatch::Client as CloudWatchClient;
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue
-    }, executors::reactor_error_code::ReactorErrorCode, send_metric, strategies::keystore::KeyStore
+        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue,
+    },
+    executors::reactor_error_code::ReactorErrorCode,
+    send_metric,
+    strategies::keystore::KeyStore,
 };
 
 /// An executor that sends transactions to the mempool.
@@ -58,7 +61,12 @@ where
 {
     /// Send a transaction to the mempool.
     async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {
-        let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, CwMetrics::ExecutionAttempted, 1.0);
+        let metric_future = build_metric_future(
+            self.cloudwatch_client.clone(),
+            DimensionValue::V3Executor,
+            CwMetrics::ExecutionAttempted,
+            1.0,
+        );
         if let Some(metric_future) = metric_future {
             send_metric!(metric_future);
         }
@@ -100,7 +108,12 @@ where
                     match error_code {
                         ReactorErrorCode::OrderAlreadyFilled => {
                             info!("Order already filled, skipping execution");
-                            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, CwMetrics::ExecutionSkippedAlreadyFilled, 1.0);
+                            let metric_future = build_metric_future(
+                                self.cloudwatch_client.clone(),
+                                DimensionValue::V3Executor,
+                                CwMetrics::ExecutionSkippedAlreadyFilled,
+                                1.0,
+                            );
                             if let Some(metric_future) = metric_future {
                                 send_metric!(metric_future);
                             }
@@ -108,7 +121,12 @@ where
                         }
                         ReactorErrorCode::InvalidDeadline => {
                             info!("Order past deadline, skipping execution");
-                            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, CwMetrics::ExecutionSkippedPastDeadline, 1.0);
+                            let metric_future = build_metric_future(
+                                self.cloudwatch_client.clone(),
+                                DimensionValue::V3Executor,
+                                CwMetrics::ExecutionSkippedPastDeadline,
+                                1.0,
+                            );
                             if let Some(metric_future) = metric_future {
                                 send_metric!(metric_future);
                             }
@@ -147,7 +165,12 @@ where
         let signer = nonce_manager.with_signer(wallet);
 
         info!("Executing tx {:?}", action.tx);
-        let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, CwMetrics::TxSubmitted, 1.0);
+        let metric_future = build_metric_future(
+            self.cloudwatch_client.clone(),
+            DimensionValue::V3Executor,
+            CwMetrics::TxSubmitted,
+            1.0,
+        );
         if let Some(metric_future) = metric_future {
             // do not block current thread by awaiting in the background
             send_metric!(metric_future);
@@ -157,9 +180,10 @@ where
         // Block on pending transaction getting confirmations
         let (receipt, status) = match result {
             Ok(tx) => {
-                let receipt = tx.confirmations(1).await.map_err(|e| {
-                    anyhow::anyhow!("Error waiting for confirmations: {}", e)
-                });
+                let receipt = tx
+                    .confirmations(1)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Error waiting for confirmations: {}", e));
                 match receipt {
                     Ok(Some(receipt)) => {
                         let status = receipt.status.unwrap_or_default();
@@ -197,7 +221,12 @@ where
         // post key-release processing
         // TODO: parse revert reason
         if let Some(_) = &self.cloudwatch_client {
-            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, receipt_status_to_metric(status.as_u64()), 1.0);
+            let metric_future = build_metric_future(
+                self.cloudwatch_client.clone(),
+                DimensionValue::V3Executor,
+                receipt_status_to_metric(status.as_u64()),
+                1.0,
+            );
             if let Some(metric_future) = metric_future {
                 // do not block current thread by awaiting in the background
                 send_metric!(metric_future);
@@ -223,7 +252,12 @@ where
                     balance_eth.clone(),
                     block_number.as_u64()
                 );
-                let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::V3Executor, CwMetrics::Balance(format!("{:?}", address)), balance_eth.parse::<f64>().unwrap_or(0.0));
+                let metric_future = build_metric_future(
+                    self.cloudwatch_client.clone(),
+                    DimensionValue::V3Executor,
+                    CwMetrics::Balance(format!("{:?}", address)),
+                    balance_eth.parse::<f64>().unwrap_or(0.0),
+                );
                 if let Some(metric_future) = metric_future {
                     send_metric!(metric_future);
                 }

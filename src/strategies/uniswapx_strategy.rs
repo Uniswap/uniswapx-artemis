@@ -2,11 +2,15 @@ use super::{
     shared::UniswapXStrategy,
     types::{Config, OrderStatus, TokenInTokenOut},
 };
-use crate::{aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue}, collectors::{
-    block_collector::NewBlock,
-    uniswapx_order_collector::UniswapXOrder,
-    uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
-}, shared::send_metric_with_order_hash};
+use crate::{
+    aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
+    collectors::{
+        block_collector::NewBlock,
+        uniswapx_order_collector::UniswapXOrder,
+        uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
+    },
+    shared::send_metric_with_order_hash,
+};
 use alloy_primitives::Uint;
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
@@ -167,9 +171,17 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                 }),
             }));
         } else {
-            let metric_future = build_metric_future(self.cloudwatch_client.clone(), DimensionValue::Router02, CwMetrics::Unprofitable, 1.0);
+            let metric_future = build_metric_future(
+                self.cloudwatch_client.clone(),
+                DimensionValue::Router02,
+                CwMetrics::Unprofitable,
+                1.0,
+            );
             if let Some(metric_future) = metric_future {
-                send_metric_with_order_hash!(&Arc::new(event.request.orders[0].hash.clone()), metric_future);
+                send_metric_with_order_hash!(
+                    &Arc::new(event.request.orders[0].hash.clone()),
+                    metric_future
+                );
             }
         }
 

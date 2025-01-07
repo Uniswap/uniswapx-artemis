@@ -31,8 +31,8 @@ use tracing_subscriber::{filter, prelude::*};
 pub mod aws_utils;
 pub mod collectors;
 pub mod executors;
-pub mod strategies;
 pub mod shared;
+pub mod strategies;
 
 /// CLI Options.
 #[derive(Parser, Debug)]
@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
 
     // Set up ethers provider.
     let chain_id = args.chain_id;
-    let provider =
-        Provider::<Http>::try_from(args.http.as_str()).expect("could not instantiate HTTP Provider");
+    let provider = Provider::<Http>::try_from(args.http.as_str())
+        .expect("could not instantiate HTTP Provider");
 
     let mevblocker_provider;
     if let Some(mevblocker_http) = args.mevblocker_http {
@@ -189,7 +189,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-
 
     let uniswapx_route_collector = Box::new(UniswapXRouteCollector::new(
         chain_id,
