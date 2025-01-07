@@ -1,7 +1,12 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use aws_sdk_cloudwatch::{config::http::HttpResponse, error::SdkError, operation::put_metric_data::{PutMetricDataError, PutMetricDataOutput}, types::Dimension};
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
+use aws_sdk_cloudwatch::{
+    config::http::HttpResponse,
+    error::SdkError,
+    operation::put_metric_data::{PutMetricDataError, PutMetricDataOutput},
+    types::Dimension,
+};
 
 /// Constants for dimension names and values
 pub const SERVICE_DIMENSION: &str = "Service";
@@ -90,8 +95,12 @@ impl From<CwMetrics> for String {
             CwMetrics::RoutingMs => ROUTING_MS.to_string(),
             CwMetrics::Unprofitable => UNPROFITABLE_METRIC.to_string(),
             CwMetrics::ExecutionAttempted => EXECUTION_ATTEMPTED_METRIC.to_string(),
-            CwMetrics::ExecutionSkippedAlreadyFilled => EXECUTION_SKIPPED_ALREADY_FILLED_METRIC.to_string(),
-            CwMetrics::ExecutionSkippedPastDeadline => EXECUTION_SKIPPED_PAST_DEADLINE_METRIC.to_string(),
+            CwMetrics::ExecutionSkippedAlreadyFilled => {
+                EXECUTION_SKIPPED_ALREADY_FILLED_METRIC.to_string()
+            }
+            CwMetrics::ExecutionSkippedPastDeadline => {
+                EXECUTION_SKIPPED_PAST_DEADLINE_METRIC.to_string()
+            }
             CwMetrics::TxSucceeded => TX_SUCCEEDED_METRIC.to_string(),
             CwMetrics::TxReverted => TX_REVERTED_METRIC.to_string(),
             CwMetrics::TxSubmitted => TX_SUBMITTED_METRIC.to_string(),
@@ -101,7 +110,6 @@ impl From<CwMetrics> for String {
         }
     }
 }
-
 
 pub const ARTEMIS_NAMESPACE: &str = "Artemis";
 
@@ -156,25 +164,38 @@ pub fn receipt_status_to_metric(status: u64) -> CwMetrics {
     }
 }
 
-pub fn build_metric_future(cloudwatch_client: Option<Arc<CloudWatchClient>>, dimension_value: DimensionValue, metric: CwMetrics, value: f64) 
-    -> Option<Pin<Box<impl Future<Output = Result<PutMetricDataOutput, SdkError<PutMetricDataError, HttpResponse>>> + Send + 'static>>> {
-        cloudwatch_client.map(|client| {
-            Box::pin(async move {
-                client
+pub fn build_metric_future(
+    cloudwatch_client: Option<Arc<CloudWatchClient>>,
+    dimension_value: DimensionValue,
+    metric: CwMetrics,
+    value: f64,
+) -> Option<
+    Pin<
+        Box<
+            impl Future<
+                    Output = Result<
+                        PutMetricDataOutput,
+                        SdkError<PutMetricDataError, HttpResponse>,
+                    >,
+                > + Send
+                + 'static,
+        >,
+    >,
+> {
+    cloudwatch_client.map(|client| {
+        Box::pin(async move {
+            client
                 .put_metric_data()
                 .namespace(ARTEMIS_NAMESPACE)
                 .metric_data(
                     MetricBuilder::new(metric)
-                        .add_dimension(
-                            DimensionName::Service.as_ref(),
-                            dimension_value.as_ref(),
-                        )
+                        .add_dimension(DimensionName::Service.as_ref(), dimension_value.as_ref())
                         .with_value(value)
                         .build(),
                 )
                 .send()
                 .await
-            })
+        })
     })
 }
 

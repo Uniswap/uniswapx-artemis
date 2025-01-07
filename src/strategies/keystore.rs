@@ -216,9 +216,15 @@ mod tests {
     #[tokio::test]
     async fn test_get_address_randomness() {
         let mut keystore = KeyStore::new();
-        keystore.add_key("address1".to_string(), "private_key1".to_string()).await;
-        keystore.add_key("address2".to_string(), "private_key2".to_string()).await;
-        keystore.add_key("address3".to_string(), "private_key3".to_string()).await;
+        keystore
+            .add_key("address1".to_string(), "private_key1".to_string())
+            .await;
+        keystore
+            .add_key("address2".to_string(), "private_key2".to_string())
+            .await;
+        keystore
+            .add_key("address3".to_string(), "private_key3".to_string())
+            .await;
 
         let mut counts = HashMap::new();
         let iterations = 1000000;
@@ -232,7 +238,10 @@ mod tests {
         // Check that each address was selected roughly equally
         for count in counts.values() {
             let proportion = *count as f64 / iterations as f64;
-            assert!((0.32..0.34).contains(&proportion), "Proportion out of expected range");
+            assert!(
+                (0.32..0.34).contains(&proportion),
+                "Proportion out of expected range"
+            );
         }
     }
 }
