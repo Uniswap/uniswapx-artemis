@@ -6,7 +6,7 @@ use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::UniswapXOrder,
+        uniswapx_order_collector::{RouteInfo, UniswapXOrder},
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
     shared::send_metric_with_order_hash,
@@ -129,7 +129,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             .map_err(|e| error!("failed to decode: {}", e))
             .ok()?;
 
-        self.update_order_state(order, &event.signature, &event.order_hash);
+        self.update_order_state(order, &event.signature, &event.order_hash, &event.route);
         None
     }
 
@@ -325,6 +325,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                         order.clone(),
                         &order_data.signature,
                         &order_hash.to_string(),
+                        &order_data.route,
                     );
                 }
                 _ => {
@@ -344,7 +345,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String) {
+    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: &RouteInfo) {
         let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
@@ -373,6 +374,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: None,
+                        route: route.clone(),
                     },
                 );
             }
