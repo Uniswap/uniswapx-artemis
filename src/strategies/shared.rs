@@ -1,52 +1,59 @@
 use crate::collectors::uniswapx_route_collector::RoutedOrder;
-use alloy_primitives::hex;
+use alloy::{
+    hex,
+    network::{AnyNetwork, TransactionBuilder},
+    primitives::{Address, U256},
+    providers::{DynProvider, Provider},
+    rpc::types::TransactionRequest,
+    serde::WithOtherFields,
+    sol,
+};
+use alloy_primitives::Bytes;
 use anyhow::Result;
 use async_trait::async_trait;
 use bindings_uniswapx::{
-    erc20::ERC20, shared_types::SignedOrder, universal_router_executor::UniversalRouterExecutor,
+    basereactor::BaseReactor::SignedOrder, erc20::ERC20,
+    universalrouterexecutor::UniversalRouterExecutor,
 };
-use ethers::{
-    abi::{ethabi, Token},
-    providers::Middleware,
-    types::{
-        transaction::eip2718::TypedTransaction, Address, Bytes, Eip1559TransactionRequest, H160,
-        U256,
-    },
-};
-use std::sync::Arc;
+use ethabi::{ethereum_types::H160, Token};
 use std::{
     str::FromStr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
 const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 pub const WETH_ADDRESS: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const ARBITRUM_GAS_PRECOMPILE: &str = "0x000000000000000000000000000000000000006C";
+
+sol! {
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    contract GasPrecompileContract {
+        function getMinimumGasPrice() external view returns (uint256);
+    }
+}
 
 #[async_trait]
-pub trait UniswapXStrategy<M: Middleware + 'static> {
+pub trait UniswapXStrategy {
     // builds a transaction to fill an order
     async fn build_fill(
         &self,
-        client: Arc<M>,
+        client: Arc<DynProvider<AnyNetwork>>,
         executor_address: &str,
         signed_orders: Vec<SignedOrder>,
         RoutedOrder { request, route, .. }: &RoutedOrder,
-    ) -> Result<TypedTransaction> {
-        let chain_id: U256 = client.get_chainid().await?;
+    ) -> Result<WithOtherFields<TransactionRequest>> {
+        let chain_id = client.get_chain_id().await?;
         let fill_contract =
-            UniversalRouterExecutor::new(H160::from_str(executor_address)?, client.clone());
+            UniversalRouterExecutor::new(Address::from_str(executor_address)?, client.clone());
 
-        let token_in: H160 = H160::from_str(&request.token_in)?;
-        let token_out: H160 = H160::from_str(&request.token_out)?;
+        let token_in = Address::from_str(&request.token_in)?;
+        let token_out = Address::from_str(&request.token_out)?;
 
         let permit2_approval = self
-            .get_tokens_to_approve(
-                client.clone(),
-                token_in,
-                executor_address,
-                PERMIT2_ADDRESS,
-            )
+            .get_tokens_to_approve(client.clone(), token_in, executor_address, PERMIT2_ADDRESS)
             .await?;
 
         let reactor_approval = self
@@ -54,18 +61,24 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
             .await?;
 
         let execute_bytes = &route.method_parameters.calldata;
-
         let encoded_execute_bytes = hex::decode(&execute_bytes[2..]).expect("Failed to decode hex");
 
-        // abi encode as [tokens to approve to permit2, tokens to approve to reactor, execute data]
+        // abi encode as [tokens to approve to swap router 02, tokens to approve to reactor,  multicall data]
         //               [address[], address[], bytes[]]
-        let encoded_params = ethabi::encode(&[
+        let encoded_calldata = ethabi::encode(&[
             Token::Array(permit2_approval),
             Token::Array(reactor_approval),
             Token::Bytes(encoded_execute_bytes),
         ]);
-        let mut call = fill_contract.execute_batch(signed_orders, Bytes::from(encoded_params));
-        Ok(call.tx.set_chain_id(chain_id.as_u64()).clone())
+        let orders: Vec<UniversalRouterExecutor::SignedOrder> = signed_orders
+            .into_iter()
+            .map(|order| UniversalRouterExecutor::SignedOrder {
+                order: order.order,
+                sig: order.sig,
+            })
+            .collect();
+        let call = fill_contract.executeBatch(orders, Bytes::from(encoded_calldata));
+        Ok(call.into_transaction_request().with_chain_id(chain_id))
     }
 
     fn current_timestamp(&self) -> Result<u64> {
@@ -75,24 +88,25 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
 
     async fn get_tokens_to_approve(
         &self,
-        client: Arc<M>,
+        client: Arc<DynProvider<AnyNetwork>>,
         token: Address,
         from: &str,
         to: &str,
     ) -> Result<Vec<Token>, anyhow::Error> {
-        if token == Address::zero() {
+        if token == Address::ZERO {
             return Ok(vec![]);
         }
         let token_contract = ERC20::new(token, client.clone());
         let allowance = token_contract
             .allowance(
-                H160::from_str(from).expect("Error encoding from address"),
-                H160::from_str(to).expect("Error encoding from address"),
+                Address::from_str(from).expect("Error encoding from address"),
+                Address::from_str(to).expect("Error encoding from address"),
             )
+            .call()
             .await
             .expect("Failed to get allowance");
-        if allowance < U256::MAX / 2 {
-            Ok(vec![Token::Address(token)])
+        if allowance._0 < U256::MAX / U256::from(2) {
+            Ok(vec![Token::Address(H160(token.0 .0))])
         } else {
             Ok(vec![])
         }
@@ -121,28 +135,14 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
 
     /// Get the minimum gas price on Arbitrum
     /// https://docs.arbitrum.io/build-decentralized-apps/precompiles/reference#arbgasinfo
-    async fn get_arbitrum_min_gas_price(&self, client: Arc<M>) -> Result<U256> {
-        const ARBITRUM_GAS_PRECOMPILE: &str = "0x000000000000000000000000000000000000006C";
-
+    async fn get_arbitrum_min_gas_price(
+        &self,
+        client: Arc<DynProvider<AnyNetwork>>,
+    ) -> Result<U256> {
         let precompile_address = ARBITRUM_GAS_PRECOMPILE.parse::<Address>()?;
-        #[allow(deprecated)]
-        let data = ethers::abi::Function {
-            name: "getMinimumGasPrice".to_string(),
-            inputs: vec![],
-            outputs: vec![ethers::abi::Param {
-                name: "".to_string(),
-                kind: ethers::abi::ParamType::Uint(256),
-                internal_type: None,
-            }],
-            constant: Some(true),
-            state_mutability: ethers::abi::StateMutability::View,
-        }
-        .encode_input(&[])?;
-        let tx = Eip1559TransactionRequest::new()
-            .to(precompile_address)
-            .data(data);
-        let result = client.call(&TypedTransaction::Eip1559(tx), None).await?;
+        let gas_precompile = GasPrecompileContract::new(precompile_address, client.clone());
+        let gas_info = gas_precompile.getMinimumGasPrice().call().await?._0;
 
-        Ok(U256::from_big_endian(&result.0))
+        Ok(gas_info)
     }
 }

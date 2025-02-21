@@ -31,7 +31,7 @@ pub enum Action {
 /// Configuration for variables we need to pass to the strategy.
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub bid_percentage: u64,
+    pub bid_percentage: u128,
     pub executor_address: String,
 }
 

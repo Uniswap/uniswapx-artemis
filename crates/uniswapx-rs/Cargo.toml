@@ -6,9 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-alloy-primitives = "0.8.18"
-alloy-sol-types = "0.8.18"
-alloy-dyn-abi = "0.8.18"
+alloy-primitives = "0.8.20"
+alloy-sol-types = "0.8.20"
+alloy-dyn-abi = "0.8.20"
 anyhow = "1.0.70"
-ethers = "2.0.14"
 hex = "0.4.3"

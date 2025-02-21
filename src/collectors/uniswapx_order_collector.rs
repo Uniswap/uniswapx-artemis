@@ -11,7 +11,7 @@ use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
-static POLL_INTERVAL_SECS: u64 = 1;
+static POLL_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug)]
 pub enum OrderTypeError {
@@ -111,8 +111,8 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
         );
 
         // stream that polls the UniswapX API every 5 seconds
-        let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(
-            POLL_INTERVAL_SECS,
+        let stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(
+            POLL_INTERVAL_MS,
         )))
         .then(move |_| {
             let url = url.clone();
@@ -143,8 +143,8 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
 #[cfg(test)]
 mod tests {
     use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
+    use alloy::hex;
     use artemis_core::types::Collector;
-    use ethers::utils::hex;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
     use uniswapx_rs::order::{V2DutchOrder, V3DutchOrder};

@@ -13,19 +13,20 @@ use crate::{
     },
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
 };
-use alloy_primitives::Uint;
+use alloy::{
+    hex,
+    network::AnyNetwork,
+    primitives::{Address, Bytes, Uint, U128, U256, U64},
+    providers::{DynProvider, Provider},
+    rpc::types::Filter,
+};
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
-use bindings_uniswapx::shared_types::SignedOrder;
+use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
 use dashmap::DashMap;
-use ethers::{
-    providers::Middleware,
-    types::{Address, Bytes, Filter, U256, U64},
-    utils::hex,
-};
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -69,7 +70,7 @@ impl ExecutionMetadata {
         }
     }
 
-    pub fn calculate_priority_fee(&self, bid_percentage: u64) -> Option<U256> {
+    pub fn calculate_priority_fee(&self, bid_percentage: U128) -> Option<U256> {
         if self.quote.le(&self.amount_out_required) {
             return None;
         }
@@ -88,15 +89,15 @@ impl ExecutionMetadata {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct UniswapXPriorityFill<M> {
-    /// Ethers client.
-    client: Arc<M>,
+pub struct UniswapXPriorityFill {
+    /// Alloy DynProvider client.
+    client: Arc<DynProvider<AnyNetwork>>,
     // AWS Cloudwatch CLient for metrics propagation
     cloudwatch_client: Option<Arc<CloudWatchClient>>,
     /// executor address
     executor_address: String,
     /// Amount of profits to bid in gas
-    bid_percentage: u64,
+    bid_percentage: u128,
     last_block_number: RwLock<u64>,
     last_block_timestamp: RwLock<u64>,
     // map of new order hashes to order data
@@ -110,9 +111,9 @@ pub struct UniswapXPriorityFill<M> {
     chain_id: u64,
 }
 
-impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
+impl UniswapXPriorityFill {
     pub fn new(
-        client: Arc<M>,
+        client: Arc<DynProvider<AnyNetwork>>,
         cloudwatch_client: Option<Arc<CloudWatchClient>>,
         config: Config,
         sender: Sender<Vec<OrderBatchData>>,
@@ -139,7 +140,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
 }
 
 #[async_trait]
-impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXPriorityFill<M> {
+impl Strategy<Event, Action> for UniswapXPriorityFill {
     async fn sync_state(&mut self) -> Result<()> {
         info!("syncing state");
 
@@ -147,7 +148,7 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXPriorityFill<M
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
-    async fn process_event(&mut self, event: Event) -> Option<Action> {
+    async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::UniswapXOrder(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
@@ -156,9 +157,9 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXPriorityFill<M
     }
 }
 
-impl<M: Middleware + 'static> UniswapXStrategy<M> for UniswapXPriorityFill<M> {}
+impl UniswapXStrategy for UniswapXPriorityFill {}
 
-impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
+impl UniswapXPriorityFill {
     pub fn get_new_order(&self, hash: &str) -> Option<OrderData> {
         self.new_orders.get(hash).map(|entry| entry.value().clone())
     }
@@ -189,13 +190,13 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
     ///     - skip if we have already processed this order
     ///     - immediately send for execution if order is fillable
     ///     - otherwise add to new_orders to be processed on new block event
-    async fn process_order_event(&self, event: &UniswapXOrder) -> Option<Action> {
+    async fn process_order_event(&self, event: &UniswapXOrder) -> Vec<Action> {
         if *self.last_block_timestamp.read().await == 0 {
             info!(
                 "{} - skipping processing new order event (no timestamp)",
                 event.order_hash
             );
-            return None;
+            return vec![];
         }
         if self.new_orders.contains_key(&event.order_hash)
             || self.processing_orders.contains_key(&event.order_hash)
@@ -204,13 +205,14 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 "{} - skipping processing new order event (already tracking)",
                 event.order_hash
             );
-            return None;
+            return vec![];
         }
 
         let order = self
             .decode_order(&event.encoded_order)
             .map_err(|e| error!("failed to decode: {}", e))
-            .ok()?;
+            .ok()
+            .unwrap();
 
         let order_hash = event.order_hash.clone();
         let resolved_order = order.resolve(
@@ -232,10 +234,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                         "{} - New order processing already done, skipping",
                         order_hash
                     );
-                    return None;
+                    return vec![];
                 }
                 let order_data = OrderData {
-                    order: Order::PriorityOrder(order),
+                    order: Order::PriorityOrder(order.clone()),
                     hash: order_hash.clone(),
                     signature: event.signature.clone(),
                     resolved,
@@ -245,9 +247,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                     .insert(order_hash.clone(), order_data.clone());
 
                 info!(
-                    "{} - Sending incoming order immediately for routing and execution at block {}",
+                    "{} - Sending incoming order immediately for routing and execution at block {}; target: {}",
                     order_hash,
-                    *self.last_block_number.read().await
+                    *self.last_block_number.read().await,
+                    order.cosignerData.auctionTargetBlock
                 );
                 let order_batch = self.get_order_batch(&order_data);
                 self.try_send_order_batch(order_batch, order_hash, order_data)
@@ -276,10 +279,10 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             }
         }
 
-        None
+        vec![]
     }
 
-    async fn process_new_route(&mut self, event: &RoutedOrder) -> Option<Action> {
+    async fn process_new_route(&mut self, event: &RoutedOrder) -> Vec<Action> {
         if event
             .request
             .orders
@@ -290,7 +293,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 "{} - Skipping route with done order",
                 event.request.orders[0].hash
             );
-            return None;
+            return vec![];
         }
 
         let OrderBatchData {
@@ -309,31 +312,42 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 amount_out_required,
             );
 
-            let signed_orders = self.get_signed_orders(orders.clone()).ok()?;
-            return Some(Action::SubmitPublicTx(
-                SubmitTxToMempoolWithExecutionMetadata {
-                    execution: SubmitTxToMempool {
-                        tx: self
-                            .build_fill(
-                                self.client.clone(),
-                                &self.executor_address,
-                                signed_orders,
-                                event,
-                            )
-                            .await
-                            .ok()?,
-                        gas_bid_info: Some(GasBidInfo {
-                            bid_percentage: self.bid_percentage,
-                            // this field is not used for priority orders
-                            total_profit: U256::from(0),
-                        }),
-                    },
-                    metadata,
-                },
-            ));
+            let signed_orders = self.get_signed_orders(orders.clone()).unwrap_or_else(|e| {
+                error!("Error getting signed orders: {}", e);
+                vec![]
+            });
+            let fill_tx_request = self
+                .build_fill(
+                    self.client.clone(),
+                    &self.executor_address,
+                    signed_orders,
+                    event,
+                )
+                .await;
+            match fill_tx_request {
+                Ok(fill_tx_request) => {
+                    return vec![Action::SubmitPublicTx(
+                        SubmitTxToMempoolWithExecutionMetadata {
+                            execution: SubmitTxToMempool {
+                                tx: fill_tx_request,
+                                gas_bid_info: Some(GasBidInfo {
+                                    bid_percentage: U128::from(self.bid_percentage),
+                                    // this field is not used for priority orders
+                                    total_profit: U128::from(0),
+                                }),
+                            },
+                            metadata,
+                        },
+                    )];
+                }
+                Err(e) => {
+                    warn!("{} - Error building fill: {}", metadata.order_hash, e);
+                    return vec![];
+                }
+            }
         }
 
-        None
+        vec![]
     }
 
     /// Process new block events
@@ -341,9 +355,9 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
     /// - check for fills from block logs and remove from processing_orders
     /// - check new_orders for orders that are now fillable and send for execution
     /// - prune done orders
-    async fn process_new_block_event(&mut self, event: &NewBlock) -> Option<Action> {
-        *self.last_block_number.write().await = event.number.as_u64();
-        *self.last_block_timestamp.write().await = event.timestamp.as_u64();
+    async fn process_new_block_event(&mut self, event: &NewBlock) -> Vec<Action> {
+        *self.last_block_number.write().await = event.number;
+        *self.last_block_timestamp.write().await = event.timestamp;
 
         info!(
             "Processing block {} at {}, Order set sizes -- open: {}, processing: {}, done: {}",
@@ -373,7 +387,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                                 DimensionName::Service.as_ref(),
                                 DimensionValue::PriorityExecutor.as_ref(),
                             )
-                            .with_value(event.number.as_u64() as f64)
+                            .with_value(event.number as f64)
                             .build(),
                     )
                     .send();
@@ -385,7 +399,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             }
         }
 
-        None
+        vec![]
     }
 
     /// encode orders into generic signed orders
@@ -438,7 +452,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         });
 
         for log in logs {
-            let order_hash = format!("0x{:x}", log.topics[1]);
+            let order_hash = format!("0x{:x}", log.topics()[1]);
             info!(
                 "{} - Removing filled order from processing_orders",
                 order_hash
@@ -478,9 +492,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
                 quote,
                 amount_out_required,
                 order_hash: request.orders[0].hash.clone(),
-                // Conversion between alloy and ethers.rs types
-                // TODO: fully migrate to alloy
-                target_block: target_block.map(|b| U64::from(U256(b.into_limbs()).as_u64())),
+                target_block: target_block.map(|b| U64::from(b)),
             }
         })
     }

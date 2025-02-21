@@ -1,33 +1,31 @@
+use alloy::{
+    network::AnyNetwork,
+    primitives::{BlockHash, BlockNumber, BlockTimestamp},
+    providers::{DynProvider, Provider},
+};
 use anyhow::Result;
 use artemis_core::types::{Collector, CollectorStream};
 use async_trait::async_trait;
-use ethers::{
-    prelude::Middleware,
-    providers::JsonRpcClient,
-    types::{BlockNumber, H256, U256, U64},
-};
-use std::{sync::Arc, time::Duration};
-use tokio::time::sleep;
-use tracing::{error, info, warn};
-
-const BLOCK_POLLING_INTERVAL: Duration = Duration::from_millis(250);
+use std::sync::Arc;
+use tokio_stream::StreamExt;
+use tracing::{error, info};
 
 /// A collector that listens for new blocks, and generates a stream of
 /// [events](NewBlock) which contain the block number and hash.
-pub struct BlockCollector<M> {
-    provider: Arc<M>,
+pub struct BlockCollector {
+    provider: Arc<DynProvider<AnyNetwork>>,
 }
 
 /// A new block event, containing the block number and hash.
 #[derive(Debug, Clone)]
 pub struct NewBlock {
-    pub hash: H256,
-    pub number: U64,
-    pub timestamp: U256,
+    pub hash: BlockHash,
+    pub number: BlockNumber,
+    pub timestamp: BlockTimestamp,
 }
 
-impl<M> BlockCollector<M> {
-    pub fn new(provider: Arc<M>) -> Self {
+impl BlockCollector {
+    pub fn new(provider: Arc<DynProvider<AnyNetwork>>) -> Self {
         Self { provider }
     }
 }
@@ -35,16 +33,11 @@ impl<M> BlockCollector<M> {
 /// Implementation of the [Collector](Collector) trait for the [BlockCollector](BlockCollector).
 /// This implementation uses polling to subscribe to new blocks.
 #[async_trait]
-impl<M> Collector<NewBlock> for BlockCollector<M>
-where
-    M: Middleware + Send + Sync,
-    M::Provider: JsonRpcClient + Send + Sync,
-    M::Error: std::fmt::Display + 'static,
-{
+impl Collector<NewBlock> for BlockCollector {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, NewBlock>> {
         // Initial block number to start tracking from
         let start_block = match self.provider.get_block_number().await {
-            Ok(num) => num.as_u64(),
+            Ok(num) => num,
             Err(e) => {
                 error!("Failed to get initial block number: {}", e);
                 return Err(e.into());
@@ -55,36 +48,12 @@ where
 
         let provider = self.provider.clone();
 
-        let stream = async_stream::stream! {
-            let mut last_block = start_block;
-
-            loop {
-                match provider.get_block(BlockNumber::Latest).await {
-                    Ok(Some(block)) => {
-                        let block_number = block.number.unwrap().as_u64();
-                        let block_timestamp = block.timestamp;
-
-                        // Update last processed block number
-                        if block_number > last_block {
-                            last_block = block_number;
-
-                            yield NewBlock {
-                                hash: block.hash.unwrap(),
-                                number: U64::from(block_number),
-                                timestamp: block_timestamp,
-                            };
-                        };
-                    }
-                    Ok(None) => {
-                        warn!("Fetched latest block but it's empty");
-                    },
-                    Err(e) => {
-                        error!("Error fetching block: {}.", e);
-                    }
-                }
-                sleep(BLOCK_POLLING_INTERVAL).await;
-            }
-        };
+        let sub = provider.subscribe_blocks().await?;
+        let stream = sub.into_stream().map(|header| NewBlock {
+            hash: header.hash,
+            number: header.number,
+            timestamp: header.timestamp,
+        });
 
         Ok(Box::pin(stream))
     }
