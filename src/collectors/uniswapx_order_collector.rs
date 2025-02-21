@@ -12,7 +12,7 @@ use tokio_stream::wrappers::IntervalStream;
 
 use super::uniswapx_route_collector::MethodParameters;
 
-static UNISWAPX_API_URL: &str = "https://k6wq9r0r46.execute-api.us-east-2.amazonaws.com/prod/dutch-auction";
+static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_SECS: u64 = 1;
 
 #[derive(Debug)]
