@@ -54,7 +54,6 @@ pub trait UniswapXStrategy<M: Middleware + 'static> {
             .await?;
 
         let execute_bytes = &route.method_parameters.calldata;
-        println!("The execute bytes are: {:?}", execute_bytes);
 
         let encoded_execute_bytes = hex::decode(&execute_bytes[2..]).expect("Failed to decode hex");
 

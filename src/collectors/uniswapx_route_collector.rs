@@ -280,7 +280,6 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                             yield route;
                         } else if !seen.contains(&request.orders[0].hash) {
                             seen.insert(request.orders[0].hash.clone());
-                            println!("Adding request because it is not in seen");
                             all_requests.push(request);
                         }
                     }
@@ -290,7 +289,6 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                 if all_requests.is_empty() {
                     if let Some(requests) = receiver.recv().await {
                         for request in requests {
-                            println!("We are in the is_empty loop and triggering get_route_from_order_service");
                             if let Some(route) = get_route_from_order_service(&request) {
                                 seen.insert(route.request.orders[0].hash.clone());
                                 yield route;
@@ -367,7 +365,7 @@ fn resolve_address(token: String) -> String {
 
 fn get_route_from_order_service(request: &OrderBatchData) -> Option<RoutedOrder> {
     if !request.orders[0].route.method_parameters.calldata.is_empty() {
-        println!("We are using the route from the order query result: {:?}", request.orders[0].route.method_parameters.calldata);
+        info!("We are using the route from the order query result");
         let order_data = &request.orders[0];
         return Some(RoutedOrder {
             request: request.clone(),
