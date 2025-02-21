@@ -21,6 +21,8 @@ use crate::{
     shared::send_metric_with_order_hash,
 };
 
+use super::uniswapx_order_collector::RouteInfo;
+
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "2.5";
 const DEADLINE: u64 = 1000;
@@ -32,6 +34,7 @@ pub struct OrderData {
     pub hash: String,
     pub signature: String,
     pub resolved: ResolvedOrder,
+    pub route: RouteInfo,
 }
 
 #[derive(Clone, Debug)]
@@ -272,8 +275,12 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                 // Collect all available messages without blocking
                 while let Ok(requests) = receiver.try_recv() {
                     for request in requests {
-                        if !seen.contains(&request.orders[0].hash) {
+                        if let Some(route) = get_route_from_order_service(&request) {
+                            seen.insert(route.request.orders[0].hash.clone());
+                            yield route;
+                        } else if !seen.contains(&request.orders[0].hash) {
                             seen.insert(request.orders[0].hash.clone());
+                            println!("Adding request because it is not in seen");
                             all_requests.push(request);
                         }
                     }
@@ -283,7 +290,11 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                 if all_requests.is_empty() {
                     if let Some(requests) = receiver.recv().await {
                         for request in requests {
-                            if !seen.contains(&request.orders[0].hash) {
+                            println!("We are in the is_empty loop and triggering get_route_from_order_service");
+                            if let Some(route) = get_route_from_order_service(&request) {
+                                seen.insert(route.request.orders[0].hash.clone());
+                                yield route;
+                            } else if !seen.contains(&request.orders[0].hash) {
                                 seen.insert(request.orders[0].hash.clone());
                                 all_requests.push(request);
                             }
@@ -352,4 +363,28 @@ fn resolve_address(token: String) -> String {
         return "ETH".to_string();
     }
     token
+}
+
+fn get_route_from_order_service(request: &OrderBatchData) -> Option<RoutedOrder> {
+    if !request.orders[0].route.method_parameters.calldata.is_empty() {
+        println!("We are using the route from the order query result: {:?}", request.orders[0].route.method_parameters.calldata);
+        let order_data = &request.orders[0];
+        return Some(RoutedOrder {
+            request: request.clone(),
+            route: OrderRoute {
+                quote: order_data.route.quote.clone(),
+                quote_gas_adjusted: order_data.route.quote_gas_adjusted.clone(),
+                gas_price_wei: order_data.route.gas_price_wei.clone(),
+                gas_use_estimate_quote: order_data.route.gas_use_estimate_quote.clone(),
+                gas_use_estimate: order_data.route.gas_use_estimate.clone(),
+                route: vec![],
+                method_parameters: order_data.route.method_parameters.clone(),
+            },
+            target_block: match &request.orders[0].order {
+                Order::PriorityOrder(order) => Some(order.cosignerData.auctionTargetBlock),
+                _ => None,
+            },
+        });
+    }
+    None
 }

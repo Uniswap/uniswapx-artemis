@@ -10,7 +10,9 @@ use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
-static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
+use super::uniswapx_route_collector::MethodParameters;
+
+static UNISWAPX_API_URL: &str = "https://k6wq9r0r46.execute-api.us-east-2.amazonaws.com/prod/dutch-auction";
 static POLL_INTERVAL_SECS: u64 = 1;
 
 #[derive(Debug)]
@@ -70,8 +72,23 @@ pub struct UniswapXOrder {
     pub chain_id: u64,
     #[serde(rename = "orderHash")]
     pub order_hash: String,
+    pub route: RouteInfo,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct RouteInfo {
+    pub quote: String,
+    #[serde(rename = "quoteGasAdjusted")]
+    pub quote_gas_adjusted: String,
+    #[serde(rename = "gasUseEstimate")]
+    pub gas_use_estimate: String,
+    #[serde(rename = "gasUseEstimateQuote")]
+    pub gas_use_estimate_quote: String,
+    #[serde(rename = "gasPriceWei")]
+    pub gas_price_wei: String,
+    #[serde(rename = "methodParameters")]
+    pub method_parameters: MethodParameters,
+}
 /// A new order event, containing the internal order.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UniswapXOrderResponse {
