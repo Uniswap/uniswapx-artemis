@@ -7,24 +7,26 @@ use crate::collectors::{
     uniswapx_order_collector::UniswapXOrder,
     uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
 };
-use alloy_primitives::Uint;
+use alloy::{
+    hex,
+    network::{AnyNetwork, TransactionBuilder},
+    primitives::{Address, Bytes, Uint, U128, U256},
+    providers::{DynProvider, Provider},
+    rpc::types::Filter,
+};
 use anyhow::Result;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
-use bindings_uniswapx::shared_types::SignedOrder;
-use ethers::{
-    providers::Middleware,
-    types::{Address, Bytes, Filter, U256},
-    utils::hex,
-};
-use std::error::Error;
+use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
+
 use std::str::FromStr;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
 };
 use std::{
+    error::Error,
     ops::{Div, Mul},
     sync::Arc,
 };
@@ -39,13 +41,13 @@ const REACTOR_ADDRESS: &str = "0xB274d5F4b833b61B340b654d600A864fB604a87c";
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct UniswapXDutchV3Fill<M> {
+pub struct UniswapXDutchV3Fill {
     /// Ethers client.
-    client: Arc<M>,
+    client: Arc<DynProvider<AnyNetwork>>,
     /// executor address
     executor_address: String,
     /// Amount of profits to bid in gas
-    bid_percentage: u64,
+    bid_percentage: u128,
     last_block_number: u64,
     last_block_timestamp: u64,
     // map of open order hashes to order data
@@ -60,9 +62,9 @@ pub struct UniswapXDutchV3Fill<M> {
     chain_id: u64,
 }
 
-impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
+impl UniswapXDutchV3Fill {
     pub fn new(
-        client: Arc<M>,
+        client: Arc<DynProvider<AnyNetwork>>,
         config: Config,
         sender: Sender<Vec<OrderBatchData>>,
         receiver: Receiver<RoutedOrder>,
@@ -89,7 +91,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
 }
 
 #[async_trait]
-impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXDutchV3Fill<M> {
+impl Strategy<Event, Action> for UniswapXDutchV3Fill {
     // In order to sync this strategy, we need to get the current bid for all Sudo pools.
     async fn sync_state(&mut self) -> Result<()> {
         info!("syncing state");
@@ -98,7 +100,7 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXDutchV3Fill<M>
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
-    async fn process_event(&mut self, event: Event) -> Option<Action> {
+    async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::UniswapXOrder(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
@@ -107,14 +109,14 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for UniswapXDutchV3Fill<M>
     }
 }
 
-impl<M: Middleware + 'static> UniswapXStrategy<M> for UniswapXDutchV3Fill<M> {}
+impl UniswapXStrategy for UniswapXDutchV3Fill {}
 
 struct DutchV3OrderWrapper {
     inner: V3DutchOrder,
     encoded_order: String,
 }
 
-impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
+impl UniswapXDutchV3Fill {
     fn decode_order(&self, encoded_order: &str) -> Result<V3DutchOrder, Box<dyn Error>> {
         let encoded_order = if let Some(stripped) = encoded_order.strip_prefix("0x") {
             stripped
@@ -127,31 +129,34 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
     }
 
     // Process new orders as they come in.
-    async fn process_order_event(&mut self, event: &UniswapXOrder) -> Option<Action> {
+    async fn process_order_event(&mut self, event: &UniswapXOrder) -> Vec<Action> {
         if self.last_block_timestamp == 0 || self.processing_orders.contains(&event.order_hash) {
-            return None;
+            return vec![];
         }
 
         let order = self
             .decode_order(&event.encoded_order)
             .map_err(|e| error!("failed to decode: {}", e))
-            .ok()?;
-        let wrapper = DutchV3OrderWrapper {
-            inner: order,
-            encoded_order: event.encoded_order.clone(),
-        };
-        self.update_order_state(wrapper, &event.signature, &event.order_hash);
-        None
+            .ok();
+
+        if let Some(order) = order {
+            let wrapper = DutchV3OrderWrapper {
+                inner: order,
+                encoded_order: event.encoded_order.clone(),
+            };
+            self.update_order_state(wrapper, &event.signature, &event.order_hash);
+        }
+        vec![]
     }
 
-    async fn process_new_route(&mut self, event: &RoutedOrder) -> Option<Action> {
+    async fn process_new_route(&mut self, event: &RoutedOrder) -> Vec<Action> {
         if event
             .request
             .orders
             .iter()
             .any(|o| self.done_orders.contains_key(&o.hash))
         {
-            return None;
+            return vec![];
         }
 
         let OrderBatchData {
@@ -167,7 +172,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
             .cloned()
             .collect();
         if filtered_orders.is_empty() {
-            return None;
+            return vec![];
         }
 
         if let Some(profit) = self.get_profit_eth(event) {
@@ -178,66 +183,74 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
                 amount_out_required,
                 profit
             );
-            let signed_orders = self.get_signed_orders(filtered_orders.clone()).ok()?;
-            let mut tx = self
+            let signed_orders = self
+                .get_signed_orders(filtered_orders.clone())
+                .unwrap_or_else(|e| {
+                    error!("Error getting signed orders: {}", e);
+                    vec![]
+                });
+            let tx_request = self
                 .build_fill(
                     self.client.clone(),
                     &self.executor_address,
                     signed_orders,
                     event,
                 )
-                .await
-                .ok()?;
-            let action = Some(Action::SubmitTx(SubmitTxToMempool {
-                tx: tx.clone(),
-                gas_bid_info: Some(GasBidInfo {
-                    bid_percentage: self.bid_percentage,
-                    total_profit: profit,
-                }),
-            }));
+                .await;
 
-            // Must be able to cover min gas cost
-            let sender_address = Address::from_str(&self.sender_address).unwrap();
-            tx.set_from(sender_address);
-            let gas_usage = self
-                .client
-                .estimate_gas(&tx, None)
-                .await
-                .unwrap_or_else(|err| {
-                    info!("Error estimating gas: {}", err);
-                    U256::from(1_000_000)
-                });
-            // Get the current min gas price
-            let min_gas_price = self
-                .get_arbitrum_min_gas_price(self.client.clone())
-                .await
-                .unwrap_or(U256::from(10_000_000));
+            match tx_request {
+                Ok(mut req) => {
+                    // Must be able to cover min gas cost
+                    let sender_address = Address::from_str(&self.sender_address).unwrap();
+                    req.set_from(sender_address);
+                    let gas_usage = self.client.estimate_gas(&req).await.unwrap_or_else(|err| {
+                        info!("Error estimating gas: {}", err);
+                        1_000_000
+                    });
+                    // Get the current min gas price
+                    let min_gas_price = self
+                        .get_arbitrum_min_gas_price(self.client.clone())
+                        .await
+                        .unwrap_or(U256::from(10_000_000));
 
-            // gas price at which we'd break even, meaning 100% of profit goes to validator
-            let breakeven_gas_price = profit / gas_usage;
-            // gas price corresponding to bid percentage
-            let bid_gas_price = breakeven_gas_price.mul(self.bid_percentage).div(100);
-            if bid_gas_price < min_gas_price {
-                info!(
-                    "Bid gas price {} is less than min gas price {}, skipping",
-                    bid_gas_price, min_gas_price
-                );
-                return None;
+                    // gas price at which we'd break even, meaning 100% of profit goes to validator
+                    let breakeven_gas_price = profit / U256::from(gas_usage);
+                    // gas price corresponding to bid percentage
+                    let bid_gas_price = breakeven_gas_price
+                        .mul(U256::from(self.bid_percentage))
+                        .div(U256::from(100));
+                    if bid_gas_price < min_gas_price {
+                        info!(
+                            "Bid gas price {} is less than min gas price {}, skipping",
+                            bid_gas_price, min_gas_price
+                        );
+                        return vec![];
+                    }
+
+                    for order in filtered_orders.iter() {
+                        self.processing_orders.insert(order.hash.clone());
+                    }
+                    return vec![Action::SubmitTx(SubmitTxToMempool {
+                        tx: req,
+                        gas_bid_info: Some(GasBidInfo {
+                            bid_percentage: U128::from(self.bid_percentage),
+                            total_profit: U128::from(profit),
+                        }),
+                    })];
+                }
+                Err(e) => {
+                    error!("Error building fill: {}", e);
+                    return vec![];
+                }
             }
-
-            for order in filtered_orders.iter() {
-                self.processing_orders.insert(order.hash.clone());
-            }
-            return action;
         }
-
-        None
+        vec![]
     }
 
     /// Process new block events, updating the internal state.
-    async fn process_new_block_event(&mut self, event: &NewBlock) -> Option<Action> {
-        self.last_block_number = event.number.as_u64();
-        self.last_block_timestamp = event.timestamp.as_u64();
+    async fn process_new_block_event(&mut self, event: &NewBlock) -> Vec<Action> {
+        self.last_block_number = event.number;
+        self.last_block_timestamp = event.timestamp;
 
         info!(
             "Processing block {} at {}, Order set sizes -- open: {}, processing: {}, done: {}",
@@ -247,19 +260,20 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
             self.processing_orders.len(),
             self.done_orders.len()
         );
-        self.handle_fills()
-            .await
-            .map_err(|e| error!("Error handling fills {}", e))
-            .ok()?;
+        self.handle_fills().await.unwrap_or_else(|e| {
+            error!("Error handling fills: {}", e);
+        });
         self.update_open_orders();
         self.prune_done_orders();
 
         self.batch_sender
             .send(self.get_order_batches().values().cloned().collect())
             .await
-            .ok()?;
+            .unwrap_or_else(|e| {
+                error!("Error sending order batches: {}", e);
+            });
 
-        None
+        vec![]
     }
 
     /// encode orders into generic signed orders
@@ -328,7 +342,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
         // early return on error
         let logs = self.client.get_logs(&filter).await?;
         for log in logs {
-            let order_hash = format!("0x{:x}", log.topics[1]);
+            let order_hash = format!("0x{:x}", log.topics()[1]);
             // remove from open
             info!("{} - Removing filled order", order_hash);
             self.open_orders.remove(&order_hash);

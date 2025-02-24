@@ -1,4 +1,5 @@
 use anyhow::Result;
+use backoff::ExponentialBackoff;
 use clap::{ArgGroup, Parser};
 
 use artemis_core::engine::Engine;
@@ -8,10 +9,13 @@ use collectors::{
     block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
     uniswapx_route_collector::UniswapXRouteCollector,
 };
-use ethers::utils::hex;
-use ethers::{
-    providers::{Http, Provider},
-    signers::{LocalWallet, Signer},
+use alloy::{
+    hex,
+    network::AnyNetwork,
+    providers::{DynProvider, ProviderBuilder, WsConnect},
+    pubsub::{ConnectionHandle, PubSubConnect},
+    signers::local::PrivateKeySigner,
+    transports::{impl_future, TransportResult},
 };
 use executors::protect_executor::ProtectExecutor;
 use executors::queued_executor::QueuedExecutor;
@@ -46,13 +50,9 @@ pub mod strategies;
         .args(&["cloudwatch_metrics"])
 ))]
 pub struct Args {
-    /// Ethereum node HTTP endpoint.
+    /// Ethereum node WSS endpoint.
     #[arg(long, required = true)]
-    pub http: String,
-
-    /// MevBlocker HTTP endpoint
-    #[arg(long, required = false)]
-    pub mevblocker_http: Option<String>,
+    pub wss: String,
 
     /// Private key for sending txs.
     #[arg(long, group = "key_source")]
@@ -69,7 +69,7 @@ pub struct Args {
 
     /// Percentage of profit to pay in gas.
     #[arg(long, required = true)]
-    pub bid_percentage: u64,
+    pub bid_percentage: u128,
 
     /// Private key for sending txs.
     #[arg(long, required = true)]
@@ -86,6 +86,27 @@ pub struct Args {
     /// chain id
     #[arg(long, required = true)]
     pub chain_id: u64,
+}
+
+/// Retrying websocket connection using exponential backoff
+#[derive(Clone, Debug)]
+pub struct RetryWsConnect(WsConnect);
+
+impl PubSubConnect for RetryWsConnect {
+    fn is_local(&self) -> bool {
+        self.0.is_local()
+    }
+
+    fn connect(&self) -> impl_future!(<Output = TransportResult<ConnectionHandle>>) {
+        self.0.connect()
+    }
+
+    async fn try_reconnect(&self) -> TransportResult<ConnectionHandle> {
+        backoff::future::retry(ExponentialBackoff::default(), || async {
+            Ok(self.0.try_reconnect().await?)
+        })
+        .await
+    }
 }
 
 #[tokio::main]
@@ -111,17 +132,12 @@ async fn main() -> Result<()> {
 
     // Set up ethers provider.
     let chain_id = args.chain_id;
-    let provider = Provider::<Http>::try_from(args.http.as_str())
-        .expect("could not instantiate HTTP Provider");
-
-    let mevblocker_provider;
-    if let Some(mevblocker_http) = args.mevblocker_http {
-        mevblocker_provider = Provider::<Http>::try_from(mevblocker_http)
-            .expect("could not instantiate MevBlocker Provider");
-    } else {
-        mevblocker_provider = Provider::<Http>::try_from(args.http.as_str())
-            .expect("could not instantiate MevBlocker Provider");
-    }
+    let provider = DynProvider::<AnyNetwork>::new(
+        ProviderBuilder::new()
+            .network::<AnyNetwork>()
+            .on_ws(WsConnect::new(args.wss.as_str()))
+            .await?,
+    );
 
     let mut key_store = Arc::new(KeyStore::new());
 
@@ -152,16 +168,15 @@ async fn main() -> Result<()> {
         }
     } else {
         let pk = args.private_key.clone().unwrap();
-        let wallet: LocalWallet = pk.parse::<LocalWallet>().unwrap().with_chain_id(chain_id);
+        let wallet: PrivateKeySigner = pk.parse().expect("can not parse private key");
         let address = wallet.address();
         Arc::make_mut(&mut key_store)
-            .add_key(hex::encode(address.as_bytes()), pk)
+            .add_key(hex::encode(address), pk)
             .await;
     }
     info!("Key store initialized with {} keys", key_store.len());
 
     let provider = Arc::new(provider);
-    let mevblocker_provider = Arc::new(mevblocker_provider);
 
     // Set up engine.
     let mut engine = Engine::default();
@@ -210,7 +225,7 @@ async fn main() -> Result<()> {
     match &args.order_type {
         OrderType::DutchV2 => {
             let uniswapx_strategy = UniswapXUniswapFill::new(
-                Arc::new(provider.clone()),
+                provider.clone(),
                 config.clone(),
                 batch_sender,
                 route_receiver,
@@ -221,7 +236,7 @@ async fn main() -> Result<()> {
         }
         OrderType::DutchV3 => {
             let uniswapx_strategy = UniswapXDutchV3Fill::new(
-                Arc::new(provider.clone()),
+                provider.clone(),
                 config.clone(),
                 batch_sender,
                 route_receiver,
@@ -232,7 +247,7 @@ async fn main() -> Result<()> {
         }
         OrderType::Priority => {
             let priority_strategy = UniswapXPriorityFill::new(
-                Arc::new(provider.clone()),
+                provider.clone(),
                 cloudwatch_client.clone(),
                 config.clone(),
                 batch_sender,
@@ -243,19 +258,6 @@ async fn main() -> Result<()> {
             engine.add_strategy(Box::new(priority_strategy));
         }
     }
-
-    let protect_executor = Box::new(ProtectExecutor::new(
-        provider.clone(),
-        mevblocker_provider.clone(),
-        key_store.clone(),
-        cloudwatch_client.clone(),
-    ));
-
-    let protect_executor = ExecutorMap::new(protect_executor, |action| match action {
-        Action::SubmitTx(tx) => Some(tx),
-        // No op for public transactions
-        _ => None,
-    });
 
     let queued_executor = Box::new(QueuedExecutor::new(
         provider.clone(),
@@ -268,6 +270,20 @@ async fn main() -> Result<()> {
         Action::SubmitPublicTx(tx) => Some(tx),
         _ => None,
     });
+
+    let protect_executor = Box::new(ProtectExecutor::new(
+        provider.clone(),
+        provider.clone(),
+        key_store.clone(),
+        cloudwatch_client.clone(),
+    ));
+
+    let protect_executor = ExecutorMap::new(protect_executor, |action| match action {
+        Action::SubmitTx(tx) => Some(tx),
+        // No op for public transactions
+        _ => None,
+    });
+
 
     engine.add_executor(Box::new(queued_executor));
     engine.add_executor(Box::new(protect_executor));

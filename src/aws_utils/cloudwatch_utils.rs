@@ -160,11 +160,10 @@ impl MetricBuilder {
     }
 }
 
-pub fn receipt_status_to_metric(status: u64, chain_id: u64) -> CwMetrics {
+pub fn receipt_status_to_metric(status: bool, chain_id: u64) -> CwMetrics {
     match status {
-        1 => CwMetrics::TxSucceeded(chain_id),
-        0 => CwMetrics::TxReverted(chain_id),
-        _ => CwMetrics::TxStatusUnknown(chain_id),
+        true => CwMetrics::TxSucceeded(chain_id),
+        false => CwMetrics::TxReverted(chain_id),
     }
 }
 
