@@ -129,7 +129,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
             .map_err(|e| error!("failed to decode: {}", e))
             .ok()?;
 
-        self.update_order_state(order, &event.signature, &event.order_hash, &event.route);
+        self.update_order_state(order, &event.signature, &event.order_hash, event.route.as_ref());
         None
     }
 
@@ -325,7 +325,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                         order.clone(),
                         &order_data.signature,
                         &order_hash.to_string(),
-                        &order_data.route,
+                        order_data.route.as_ref(),
                     );
                 }
                 _ => {
@@ -345,7 +345,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: &RouteInfo) {
+    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: Option<&RouteInfo>) {
         let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
@@ -374,7 +374,7 @@ impl<M: Middleware + 'static> UniswapXUniswapFill<M> {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: None,
-                        route: route.clone(),
+                        route: route.cloned()
                     },
                 );
             }

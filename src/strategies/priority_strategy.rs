@@ -496,7 +496,7 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         order: PriorityOrder,
         order_hash: String,
         signature: &str,
-        route: RouteInfo,
+        route: Option<RouteInfo>,
     ) -> Result<()> {
         let resolved = order.resolve(
             *self.last_block_number.read().await,

@@ -140,7 +140,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
             inner: order,
             encoded_order: event.encoded_order.clone(),
         };
-        self.update_order_state(wrapper, &event.signature, &event.order_hash, &event.route);
+        self.update_order_state(wrapper, &event.signature, &event.order_hash, event.route.as_ref());
         None
     }
 
@@ -368,7 +368,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
                         },
                         &order_data.signature,
                         &order_hash.to_string(),
-                        &order_data.route,
+                        order_data.route.as_ref(),
                     );
                 }
                 _ => {
@@ -394,7 +394,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
         order: DutchV3OrderWrapper,
         signature: &str,
         order_hash: &String,
-        route: &RouteInfo,
+        route: Option<&RouteInfo>,
     ) {
         let resolved = order
             .inner
@@ -426,7 +426,7 @@ impl<M: Middleware + 'static> UniswapXDutchV3Fill<M> {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: Some(order.encoded_order),
-                        route: route.clone(),
+                        route: route.cloned(),
                     },
                 );
             }
