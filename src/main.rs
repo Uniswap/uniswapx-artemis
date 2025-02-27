@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
     let uniswapx_order_collector = Box::new(UniswapXOrderCollector::new(
         chain_id,
         args.order_type.clone(),
+        args.executor_address.clone(),
     ));
     let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
         Event::UniswapXOrder(Box::new(e))

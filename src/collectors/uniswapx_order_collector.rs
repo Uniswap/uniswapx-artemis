@@ -88,15 +88,17 @@ pub struct UniswapXOrderCollector {
     pub base_url: String,
     pub chain_id: u64,
     pub order_type: OrderType,
+    pub execute_address: String,
 }
 
 impl UniswapXOrderCollector {
-    pub fn new(chain_id: u64, order_type: OrderType) -> Self {
+    pub fn new(chain_id: u64, order_type: OrderType, execute_address: String) -> Self {
         Self {
             client: Client::new(),
             base_url: UNISWAPX_API_URL.to_string(),
             chain_id,
             order_type,
+            execute_address,
         }
     }
 }
@@ -108,8 +110,8 @@ impl UniswapXOrderCollector {
 impl Collector<UniswapXOrder> for UniswapXOrderCollector {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, UniswapXOrder>> {
         let url = format!(
-            "{}/orders?orderStatus=open&chainId={}&orderType={}&limit=500",
-            self.base_url, self.chain_id, self.order_type,
+            "{}/orders?orderStatus=open&chainId={}&orderType={}&limit=500&executeAddress={}",
+            self.base_url, self.chain_id, self.order_type, self.execute_address,
         );
 
         // stream that polls the UniswapX API every 5 seconds
@@ -173,6 +175,8 @@ mod tests {
             base_url: url.clone(),
             chain_id: 1,
             order_type: order_type,
+            // Inconsequential query parameter because we mock the order service response
+            execute_address: "0x0000000000000000000000000000000000000000".to_string(),
         };
 
         (res, server, mock)
