@@ -9,8 +9,7 @@ use std::str::FromStr;
 use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
-
-use super::uniswapx_route_collector::MethodParameters;
+use crate::shared::RouteInfo;
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_SECS: u64 = 1;
@@ -75,20 +74,6 @@ pub struct UniswapXOrder {
     pub route: Option<RouteInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RouteInfo {
-    pub quote: String,
-    #[serde(rename = "quoteGasAdjusted")]
-    pub quote_gas_adjusted: String,
-    #[serde(rename = "gasUseEstimate")]
-    pub gas_use_estimate: String,
-    #[serde(rename = "gasUseEstimateQuote")]
-    pub gas_use_estimate_quote: String,
-    #[serde(rename = "gasPriceWei")]
-    pub gas_price_wei: String,
-    #[serde(rename = "methodParameters")]
-    pub method_parameters: MethodParameters,
-}
 /// A new order event, containing the internal order.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UniswapXOrderResponse {

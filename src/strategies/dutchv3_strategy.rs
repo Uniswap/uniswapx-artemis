@@ -2,10 +2,13 @@ use super::{
     shared::UniswapXStrategy,
     types::{Config, OrderStatus, TokenInTokenOut},
 };
-use crate::collectors::{
-    block_collector::NewBlock,
-    uniswapx_order_collector::{RouteInfo, UniswapXOrder},
-    uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
+use crate::{
+    collectors::{
+        block_collector::NewBlock,
+        uniswapx_order_collector::UniswapXOrder,
+        uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
+    },
+    shared::RouteInfo,
 };
 use alloy_primitives::Uint;
 use anyhow::Result;

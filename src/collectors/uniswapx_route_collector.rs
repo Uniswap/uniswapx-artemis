@@ -18,10 +18,8 @@ use reqwest::{Client, StatusCode};
 
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
-    shared::send_metric_with_order_hash,
+    shared::{send_metric_with_order_hash, RouteInfo, MethodParameters},
 };
-
-use super::uniswapx_order_collector::RouteInfo;
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
 const SLIPPAGE_TOLERANCE: &str = "2.5";
@@ -110,14 +108,6 @@ pub enum Route {
     V3(V3Route),
     #[serde(rename = "v2-pool")]
     V2(V2Route),
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type")]
-pub struct MethodParameters {
-    pub calldata: String,
-    pub value: String,
-    pub to: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

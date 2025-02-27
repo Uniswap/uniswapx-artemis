@@ -8,9 +8,10 @@ use crate::{
     },
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::{RouteInfo, UniswapXOrder},
+        uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
+    shared::RouteInfo,
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
 };
 use alloy_primitives::Uint;

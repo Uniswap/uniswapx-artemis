@@ -6,10 +6,10 @@ use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::{RouteInfo, UniswapXOrder},
+        uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
-    shared::send_metric_with_order_hash,
+    shared::{send_metric_with_order_hash, RouteInfo},
 };
 use alloy_primitives::Uint;
 use anyhow::Result;
