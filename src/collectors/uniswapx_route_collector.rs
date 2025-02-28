@@ -353,7 +353,7 @@ fn resolve_address(token: String) -> String {
     token
 }
 
-fn get_route_from_order_service(request: &OrderBatchData) -> Option<RoutedOrder> {
+pub fn get_route_from_order_service(request: &OrderBatchData) -> Option<RoutedOrder> {
     if let Some(route) = &request.orders[0].route {
         if !route.method_parameters.calldata.is_empty() {
             info!("We are using the route from the order query result for order hash {}", request.orders[0].hash);

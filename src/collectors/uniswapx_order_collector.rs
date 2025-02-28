@@ -146,12 +146,24 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
 
 #[cfg(test)]
 mod tests {
-    use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
+    use crate::collectors::{
+        uniswapx_order_collector::UniswapXOrderCollector,
+        uniswapx_route_collector::{
+            get_route_from_order_service, OrderBatchData, OrderData, RoutedOrder, UniswapXRouteCollector,
+        },
+    };
+    use crate::shared::{MethodParameters, RouteInfo};
+    
+    use alloy_primitives::{Address, Bytes, U256};
     use artemis_core::types::Collector;
     use ethers::utils::hex;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
-    use uniswapx_rs::order::{V2DutchOrder, V3DutchOrder};
+    use tokio::sync::mpsc::{channel, Receiver, Sender};
+    use uniswapx_rs::order::{
+        Order, OrderInfo, PriorityCosignerData, PriorityInput, PriorityOrder, ResolvedInput,
+        ResolvedOrder, V2DutchOrder, V3DutchOrder,
+    };
 
     use super::OrderType;
 
@@ -180,6 +192,106 @@ mod tests {
         };
 
         (res, server, mock)
+    }
+
+    // Helper mock order objects
+    fn create_mock_priority_order() -> PriorityOrder {
+        PriorityOrder {
+            info: OrderInfo {
+                reactor: Address::ZERO,
+                swapper: Address::ZERO,
+                nonce: U256::from(0),
+                deadline: U256::from(0),
+                additionalValidationContract: Address::ZERO,
+                additionalValidationData: Bytes::default(),
+            },
+            input: PriorityInput {
+                token: Address::ZERO,
+                amount: U256::from(0),
+                mpsPerPriorityFeeWei: U256::from(0),
+            },
+            outputs: vec![],
+            cosignerData: PriorityCosignerData {
+                auctionTargetBlock: U256::from(0),
+            },
+            cosignature: Bytes::default().into(),
+            cosigner: Address::ZERO,
+            auctionStartBlock: U256::from(0),
+            baselinePriorityFeeWei: U256::from(0),
+        }
+    }
+    
+    fn create_mock_resolved_order() -> ResolvedOrder {
+        ResolvedOrder {
+            input: ResolvedInput {
+                token: Address::ZERO.to_string(),
+                amount: U256::from(0),
+            },
+            outputs: vec![],
+        }
+    }
+
+    fn create_mock_route_info(with_calldata: bool) -> RouteInfo {
+        RouteInfo {
+            quote: "1000000000000000000".to_string(),
+            quote_gas_adjusted: "990000000000000000".to_string(),
+            gas_use_estimate: "100000".to_string(),
+            gas_use_estimate_quote: "10000000000000000".to_string(),
+            gas_price_wei: "5000000000".to_string(),
+            method_parameters: MethodParameters {
+                calldata: match with_calldata {
+                    true => "0x1234abcd".to_string(),
+                    false => "".to_string(),
+                },
+                value: "0".to_string(),
+                to: "0xabcdef1234567890abcdef1234567890abcdef12".to_string(),
+            },
+        }
+    }
+
+    // Helper function to create a test OrderBatchData with or without a route
+    fn create_test_batch(with_route: bool) -> OrderBatchData {
+        let priority_order = create_mock_priority_order();
+        let resolved = create_mock_resolved_order();
+        let order = Order::PriorityOrder(priority_order);
+        // Give them different hashes to track them
+        let order_hash = match with_route {
+            true => "0xyesroute".to_string(),
+            false => "0xnoroute".to_string(),
+        };
+        let route = Some(create_mock_route_info(with_route));
+        let order_data = OrderData {
+            order,
+            encoded_order: Some("0x1234".to_string()),
+            hash: order_hash,
+            signature: "0xsignature".to_string(),
+            resolved,
+            route,
+        };
+        OrderBatchData {
+            orders: vec![order_data],
+            chain_id: 1,
+            amount_in: U256::from(1),
+            amount_out_required: U256::from(2),
+            token_in: Address::ZERO.to_string(),
+            token_out: Address::ZERO.to_string(),
+        }
+    }
+
+    // Helper function to create a route collector for testing
+    async fn mock_route_collector() -> (UniswapXRouteCollector, Sender<Vec<OrderBatchData>>, Receiver<RoutedOrder>) {
+        let (order_batch_sender, order_batch_receiver) = channel(100);
+        let (routed_order_sender, routed_order_receiver) = channel(100);
+        
+        let collector = UniswapXRouteCollector::new(
+            1,
+            order_batch_receiver,
+            routed_order_sender,
+            "0xexecutor".to_string(),
+            None,
+        );
+        
+        (collector, order_batch_sender, routed_order_receiver)
     }
 
     #[tokio::test]
@@ -260,5 +372,93 @@ mod tests {
             Err(e) => panic!("Error decoding order: {:?}", e),
             _ => (),
         }
+    }
+
+    #[tokio::test]
+    async fn uses_existing_route_when_available() {
+        let (collector, order_batch_sender, _) = mock_route_collector().await;
+        
+        // Create batch with a route with non-empty calldata
+        let batch_with_route = create_test_batch(true);
+        let order_hash = batch_with_route.orders[0].hash.clone();
+        
+        // Start the collector stream
+        let collector_task = tokio::spawn(async move {
+            let mut stream = collector.get_event_stream().await.unwrap();
+            stream.next().await
+        });
+        
+        order_batch_sender.send(vec![batch_with_route]).await.unwrap();
+        let result = collector_task.await.unwrap();
+        
+        // Check that it yields a RoutedOrder with the saved calldata
+        assert!(result.is_some());
+        let routed_order = result.unwrap();
+        assert_eq!(routed_order.request.orders[0].hash, order_hash);
+        assert_eq!(routed_order.route.method_parameters.calldata, "0x1234abcd");
+    }
+
+    #[tokio::test]
+    async fn requests_route_when_not_available() {
+        let (collector, order_batch_sender, _) = mock_route_collector().await;
+        // Create a batch with empty calldata
+        let batch_without_route = create_test_batch(false);
+        let order_hash = batch_without_route.orders[0].hash.clone();
+        
+        let collector_task = tokio::spawn(async move {
+            let _ = collector.get_event_stream().await.unwrap();
+            let mut route_requests = Vec::new();
+            let mut receiver = collector.route_request_receiver.lock().await;
+            // Send the batch without route
+            order_batch_sender.send(vec![batch_without_route]).await.unwrap();
+            // Check if the batch was added to route_requests
+            if let Some(requests) = receiver.recv().await {
+                for request in requests {
+                    if get_route_from_order_service(&request).is_none() { // This is the check we use for no calldata
+                        route_requests.push(request);
+                    }
+                }
+            }
+            route_requests
+        });
+        
+        let route_requests = collector_task.await.unwrap();
+        
+        // route_requests should contain the batch because it had no calldata
+        assert_eq!(route_requests.len(), 1);
+        assert_eq!(route_requests[0].orders[0].hash, order_hash);
+    }
+
+    #[tokio::test]
+    async fn handles_mixed_batches_correctly() {
+        let (collector, order_batch_sender, _) = mock_route_collector().await;
+        
+        // Create batches with and without a route with calldata
+        let batch_with_route = create_test_batch(true);
+        let batch_without_route = create_test_batch(false);
+        let without_route_hash = batch_without_route.orders[0].hash.clone();
+        
+        let collector_task = tokio::spawn(async move {
+            let _ = collector.get_event_stream().await.unwrap();
+            let mut route_requests = Vec::new();
+            // Make sure the message stays for us to check
+            let mut receiver = collector.route_request_receiver.lock().await;
+            // Send both batches to the collector
+            order_batch_sender.send(vec![batch_with_route.clone(), batch_without_route.clone()]).await.unwrap();
+            // Check if the batches were added to route_requests
+            if let Some(requests) = receiver.recv().await {
+                for request in requests {
+                    if get_route_from_order_service(&request).is_none() {
+                        route_requests.push(request);
+                    }
+                }
+            }
+            route_requests
+        });
+        
+        let route_requests = collector_task.await.unwrap();
+        // Only the batch without a route should be added to route_requests
+        assert_eq!(route_requests.len(), 1);
+        assert_eq!(route_requests[0].orders[0].hash, without_route_hash);
     }
 }
