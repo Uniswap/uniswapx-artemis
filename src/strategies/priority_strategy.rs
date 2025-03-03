@@ -214,10 +214,15 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
             .ok()?;
 
         let order_hash = event.order_hash.clone();
+        let has_calldata = event.route.as_ref()
+            .map(|route| !route.method_parameters.calldata.is_empty())
+            .unwrap_or(false);
+
         let resolved_order = order.resolve(
             *self.last_block_number.read().await,
             *self.last_block_timestamp.read().await + BLOCK_TIME,
             Uint::from(0),
+            has_calldata,
         );
 
         let order_status = match resolved_order {
@@ -499,10 +504,12 @@ impl<M: Middleware + 'static> UniswapXPriorityFill<M> {
         signature: &str,
         route: Option<RouteInfo>,
     ) -> Result<()> {
+        let has_calldata = route.as_ref().map(|route| !route.method_parameters.calldata.is_empty()).unwrap_or(false);
         let resolved = order.resolve(
             *self.last_block_number.read().await,
             *self.last_block_timestamp.read().await + BLOCK_TIME,
             Uint::from(0),
+            has_calldata,
         );
         let order_status = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
