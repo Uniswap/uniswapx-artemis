@@ -255,7 +255,7 @@ impl PriorityOrder {
         PriorityOrder::abi_encode(self)
     }
 
-    pub fn resolve(&self, block_number: u64, timestamp: u64, priority_fee: BigUint) -> OrderResolution {
+    pub fn resolve(&self, block_number: u64, timestamp: u64, priority_fee: BigUint, has_calldata: bool) -> OrderResolution {
         let timestamp = BigUint::from(timestamp);
 
         if self.info.deadline.lt(&timestamp) {
@@ -271,7 +271,10 @@ impl PriorityOrder {
 
         let min_start_block = std::cmp::min(self.cosignerData.auctionTargetBlock, self.auctionStartBlock);
 
-        if BigUint::from(block_number).lt(&min_start_block.saturating_sub(BigUint::from(2))) {
+        // If the order already has calldata, we can quickly process it the block before the target block
+        // Otherwise, we need to process it in targetBlock - 2 to give time for the routing-api call (~1 second)
+        let buffer = if has_calldata { 1 } else { 2 };
+        if BigUint::from(block_number).lt(&min_start_block.saturating_sub(BigUint::from(buffer))) {
             return OrderResolution::NotFillableYet(ResolvedOrder { input, outputs });
         };
 
