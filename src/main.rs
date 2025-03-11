@@ -1,3 +1,4 @@
+use alloy::rpc::client::ClientBuilder;
 use anyhow::Result;
 use backoff::ExponentialBackoff;
 use clap::{ArgGroup, Parser};
@@ -29,7 +30,7 @@ use strategies::{
     uniswapx_strategy::UniswapXUniswapFill,
 };
 use tokio::sync::mpsc::channel;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::{filter, prelude::*};
 
 pub mod aws_utils;
@@ -89,6 +90,7 @@ pub struct Args {
 }
 
 /// Retrying websocket connection using exponential backoff
+/// https://github.com/alloy-rs/alloy/issues/690#issuecomment-2173956489
 #[derive(Clone, Debug)]
 pub struct RetryWsConnect(WsConnect);
 
@@ -102,6 +104,8 @@ impl PubSubConnect for RetryWsConnect {
     }
 
     async fn try_reconnect(&self) -> TransportResult<ConnectionHandle> {
+        warn!("Trying to reconnect to ws");
+
         backoff::future::retry(ExponentialBackoff::default(), || async {
             Ok(self.0.try_reconnect().await?)
         })
@@ -132,11 +136,15 @@ async fn main() -> Result<()> {
 
     // Set up ethers provider.
     let chain_id = args.chain_id;
+
+    let ws = WsConnect::new(args.wss.as_str());
+    let retry_ws = RetryWsConnect(ws);
+    let client = ClientBuilder::default().pubsub(retry_ws).await?;
+
     let provider = DynProvider::<AnyNetwork>::new(
         ProviderBuilder::new()
             .network::<AnyNetwork>()
-            .on_ws(WsConnect::new(args.wss.as_str()))
-            .await?,
+            .on_client(client)
     );
 
     let mut key_store = Arc::new(KeyStore::new());
