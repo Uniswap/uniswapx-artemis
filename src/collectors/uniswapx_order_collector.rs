@@ -71,6 +71,7 @@ pub struct UniswapXOrder {
     pub chain_id: u64,
     #[serde(rename = "orderHash")]
     pub order_hash: String,
+    // We don't parse the cached route so that we always fetch the latest route from routing-api
     #[serde(skip_deserializing, default)]
     pub route: Option<RouteInfo>,
 }
