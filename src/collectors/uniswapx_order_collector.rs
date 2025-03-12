@@ -71,6 +71,7 @@ pub struct UniswapXOrder {
     pub chain_id: u64,
     #[serde(rename = "orderHash")]
     pub order_hash: String,
+    #[serde(skip_deserializing, default)]
     pub route: Option<RouteInfo>,
 }
 
