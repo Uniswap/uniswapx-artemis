@@ -265,10 +265,7 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                 // Collect all available messages without blocking
                 while let Ok(requests) = receiver.try_recv() {
                     for request in requests {
-                        if let Some(route) = get_route_from_order_service(&request) {
-                            seen.insert(route.request.orders[0].hash.clone());
-                            yield route;
-                        } else if !seen.contains(&request.orders[0].hash) {
+                        if !seen.contains(&request.orders[0].hash) {
                             seen.insert(request.orders[0].hash.clone());
                             all_requests.push(request);
                         }
@@ -279,10 +276,7 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                 if all_requests.is_empty() {
                     if let Some(requests) = receiver.recv().await {
                         for request in requests {
-                            if let Some(route) = get_route_from_order_service(&request) {
-                                seen.insert(route.request.orders[0].hash.clone());
-                                yield route;
-                            } else if !seen.contains(&request.orders[0].hash) {
+                            if !seen.contains(&request.orders[0].hash) {
                                 seen.insert(request.orders[0].hash.clone());
                                 all_requests.push(request);
                             }
@@ -356,7 +350,7 @@ fn resolve_address(token: String) -> String {
 pub fn get_route_from_order_service(request: &OrderBatchData) -> Option<RoutedOrder> {
     if let Some(route) = &request.orders[0].route {
         if !route.method_parameters.calldata.is_empty() {
-            info!("We are using the route from the order query result for order hash {}", request.orders[0].hash);
+            info!("{} - Received cached route for order", request.orders[0].hash);
             return Some(RoutedOrder {
                 request: request.clone(),
                 route: OrderRoute {

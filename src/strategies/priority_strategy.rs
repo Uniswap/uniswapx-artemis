@@ -9,7 +9,7 @@ use crate::{
     collectors::{
         block_collector::NewBlock,
         uniswapx_order_collector::UniswapXOrder,
-        uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
+        uniswapx_route_collector::{OrderBatchData, OrderData, OrderRoute, RoutedOrder},
     },
     shared::RouteInfo,
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
@@ -35,16 +35,23 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     RwLock,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, PriorityOrder, MPS};
 
 use super::types::{Action, Event};
 
-const BLOCK_TIME: u64 = 2;
 const DONE_EXPIRY: u64 = 300;
 // Base addresses
 const REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
+
+fn get_block_time(chain_id: u64) -> u64 {
+    match chain_id {
+        130 => 1,   // Unichain
+        8453 => 2,  // Base Mainnet
+        _ => 2,     // Default to 2 seconds for unknown chains
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ExecutionMetadata {
@@ -88,6 +95,14 @@ impl ExecutionMetadata {
     }
 }
 
+/// Strategy for filling UniswapX Priority Orders
+/// 
+/// This strategy:
+/// - Tracks new orders from the UniswapX API
+/// - Routes orders through Uniswap's routing API
+/// - Submits fillable orders to the mempool
+/// - Handles order lifecycle (new -> processing -> done)
+/// - Prunes completed orders periodically
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct UniswapXPriorityFill {
@@ -180,9 +195,27 @@ impl UniswapXPriorityFill {
         } else {
             encoded_order
         };
-        let order_hex = hex::decode(encoded_order)?;
+        
+        let order_hex = hex::decode(encoded_order)
+            .map_err(|e| format!("Failed to decode hex: {}", e))?;
 
         PriorityOrder::decode_inner(&order_hex, false)
+            .map_err(|e| format!("Failed to decode order: {}", e).into())
+    }
+
+    async fn get_order_status(&self, order: &PriorityOrder) -> OrderStatus {
+        let resolved_order = order.resolve(
+            *self.last_block_number.read().await,
+            *self.last_block_timestamp.read().await,
+            get_block_time(self.chain_id),
+            Uint::from(0),
+        );
+        let order_status = match resolved_order {
+            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
+            OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
+            OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
+        };
+        order_status
     }
 
     /// Process new order events that we fetch from UniswapX API
@@ -197,16 +230,16 @@ impl UniswapXPriorityFill {
                 "{} - skipping processing new order event (no timestamp)",
                 event.order_hash
             );
-            return vec![];
+            return self.check_orders_for_submission().await;
         }
         if self.new_orders.contains_key(&event.order_hash)
             || self.processing_orders.contains_key(&event.order_hash)
         {
-            info!(
+            debug!(
                 "{} - skipping processing new order event (already tracking)",
                 event.order_hash
             );
-            return vec![];
+            return self.check_orders_for_submission().await;
         }
 
         let order = self
@@ -216,31 +249,18 @@ impl UniswapXPriorityFill {
             .unwrap();
 
         let order_hash = event.order_hash.clone();
-        let has_calldata = event.route.as_ref()
-            .map(|route| !route.method_parameters.calldata.is_empty())
-            .unwrap_or(false);
 
-        let resolved_order = order.resolve(
-            *self.last_block_number.read().await,
-            *self.last_block_timestamp.read().await + BLOCK_TIME,
-            Uint::from(0),
-            has_calldata,
-        );
-
-        let order_status = match resolved_order {
-            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
-            OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
-        };
-
-        match order_status {
-            OrderStatus::Open(resolved) => {
+        match self.get_order_status(&order).await {
+            OrderStatus::Done => {
+                debug!("{} - Order already done, skipping", order_hash);
+            }
+            OrderStatus::NotFillableYet(resolved) | OrderStatus::Open(resolved) => {
                 if self.done_orders.contains_key(&order_hash) {
                     info!(
                         "{} - New order processing already done, skipping",
                         order_hash
                     );
-                    return vec![];
+                    return self.check_orders_for_submission().await;
                 }
                 let order_data = OrderData {
                     order: Order::PriorityOrder(order.clone()),
@@ -250,44 +270,20 @@ impl UniswapXPriorityFill {
                     encoded_order: None,
                     route: event.route.clone(),
                 };
-                self.processing_orders
-                    .insert(order_hash.clone(), order_data.clone());
+                self.new_orders.insert(order_hash.clone(), order_data.clone());
 
                 info!(
-                    "{} - Sending incoming order immediately for routing and execution at block {}; target: {}",
+                    "{} - Route new order at block {}; target: {}",
                     order_hash,
                     *self.last_block_number.read().await,
                     order.cosignerData.auctionTargetBlock
                 );
                 let order_batch = self.get_order_batch(&order_data);
-                self.try_send_order_batch(order_batch, order_hash, order_data)
+                self.try_route_order_batch(order_batch, order_hash)
                     .await;
             }
-            OrderStatus::NotFillableYet(resolved) => {
-                info!(
-                    "{} - Adding new order not fillable yet - last block: {}, target: {}",
-                    order_hash,
-                    *self.last_block_number.read().await,
-                    order.cosignerData.auctionTargetBlock
-                );
-                self.new_orders.insert(
-                    order_hash.clone(),
-                    OrderData {
-                        order: Order::PriorityOrder(order),
-                        hash: order_hash.clone(),
-                        signature: event.signature.clone(),
-                        resolved,
-                        encoded_order: None,
-                        route: event.route.clone(),
-                    },
-                );
-            }
-            OrderStatus::Done => {
-                info!("{} - Order already done, skipping", order_hash);
-            }
         }
-
-        vec![]
+        return self.check_orders_for_submission().await
     }
 
     async fn process_new_route(&mut self, event: &RoutedOrder) -> Vec<Action> {
@@ -304,58 +300,41 @@ impl UniswapXPriorityFill {
             return vec![];
         }
 
-        let OrderBatchData {
-            // orders,
-            orders,
-            amount_out_required,
-            ..
-        } = &event.request;
+        // Store route in processing_orders
+        for order in &event.request.orders {
+            info!("{} - Received new route for order", order.hash);
+            if let Some(mut entry) = self.processing_orders.get_mut(&order.hash) {
+                // Update the route in the existing OrderData
+                entry.value_mut().route = Some(RouteInfo {
+                    quote: event.route.quote.clone(),
+                    quote_gas_adjusted: event.route.quote_gas_adjusted.clone(),
+                    gas_use_estimate: event.route.gas_use_estimate.clone(),
+                    gas_use_estimate_quote: event.route.gas_use_estimate_quote.clone(),
+                    gas_price_wei: event.route.gas_price_wei.clone(),
+                    method_parameters: event.route.method_parameters.clone(),
+                });
 
-        if let Some(metadata) = self.get_execution_metadata(event) {
-            info!(
-                "{} - Sending trade: num trades: {} routed quote: {}, batch needs: {}",
-                metadata.order_hash,
-                orders.len(),
-                event.route.quote,
-                amount_out_required,
-            );
+                // Check if order is fillable
+                let resolved_order = match &entry.order {
+                    Order::PriorityOrder(order) => order,
+                    _ => continue,
+                };
 
-            let signed_orders = self.get_signed_orders(orders.clone()).unwrap_or_else(|e| {
-                error!("Error getting signed orders: {}", e);
-                vec![]
-            });
-            let fill_tx_request = self
-                .build_fill(
-                    self.client.clone(),
-                    &self.executor_address,
-                    signed_orders,
-                    event,
-                )
-                .await;
-            match fill_tx_request {
-                Ok(fill_tx_request) => {
-                    return vec![Action::SubmitPublicTx(
-                        SubmitTxToMempoolWithExecutionMetadata {
-                            execution: SubmitTxToMempool {
-                                tx: fill_tx_request,
-                                gas_bid_info: Some(GasBidInfo {
-                                    bid_percentage: U128::from(self.bid_percentage),
-                                    // this field is not used for priority orders
-                                    total_profit: U128::from(0),
-                                }),
-                            },
-                            metadata,
-                        },
-                    )];
-                }
-                Err(e) => {
-                    warn!("{} - Error building fill: {}", metadata.order_hash, e);
-                    return vec![];
+                if let OrderStatus::NotFillableYet(_) = self.get_order_status(resolved_order).await {
+                    let order_batch = self.get_order_batch(entry.value());
+                    self.try_route_order_batch(order_batch, order.hash.clone())
+                        .await;
+                    info!(
+                        "{} - Order not fillable yet, refreshing route at block {}",
+                        order.hash,
+                        *self.last_block_number.read().await
+                    );
                 }
             }
         }
 
-        vec![]
+        // Try to submit the order and return any actions
+        return self.check_orders_for_submission().await
     }
 
     /// Process new block events
@@ -381,7 +360,7 @@ impl UniswapXPriorityFill {
             error!("Error handling fills: {}", e);
         }
 
-        self.check_new_orders_for_processing().await;
+        let actions = self.check_new_orders_for_processing().await;
 
         if *self.last_block_number.read().await % 100 == 0 {
             self.prune_done_orders().await;
@@ -407,7 +386,7 @@ impl UniswapXPriorityFill {
             }
         }
 
-        vec![]
+        actions
     }
 
     /// encode orders into generic signed orders
@@ -465,6 +444,7 @@ impl UniswapXPriorityFill {
                 "{} - Removing filled order from processing_orders",
                 order_hash
             );
+            self.new_orders.remove(&order_hash);
             self.processing_orders.remove(&order_hash);
             self.done_orders.insert(
                 order_hash.to_string(),
@@ -516,37 +496,17 @@ impl UniswapXPriorityFill {
         signature: &str,
         route: Option<RouteInfo>,
     ) -> Result<()> {
-        let has_calldata = route.as_ref().map(|route| !route.method_parameters.calldata.is_empty()).unwrap_or(false);
-        let resolved = order.resolve(
-            *self.last_block_number.read().await,
-            *self.last_block_timestamp.read().await + BLOCK_TIME,
-            Uint::from(0),
-            has_calldata,
-        );
-        let order_status = match resolved {
-            OrderResolution::Expired => OrderStatus::Done,
-            OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::NotFillableYet(resolved_order) => {
-                OrderStatus::NotFillableYet(resolved_order)
-            }
-            OrderResolution::Resolved(resolved_order) => OrderStatus::Open(resolved_order),
-        };
+        let order_status = self.get_order_status(&order).await;
 
         match order_status {
             OrderStatus::Done => {
+                info!("{} - Order is done, removing from new_orders and processing_orders", order_hash);
                 self.new_orders.remove(&order_hash);
+                self.processing_orders.remove(&order_hash);
                 self.done_orders
                     .insert(order_hash, self.current_timestamp()? + DONE_EXPIRY);
             }
-            OrderStatus::NotFillableYet(_) => {
-                info!(
-                    "{} - Order not fillable yet at latest block: {}; target: {}",
-                    order_hash,
-                    *self.last_block_number.read().await,
-                    order.cosignerData.auctionTargetBlock
-                );
-            }
-            OrderStatus::Open(resolved_order) => {
+            OrderStatus::NotFillableYet(resolved_order) | OrderStatus::Open(resolved_order) => {
                 let order_data = OrderData {
                     order: Order::PriorityOrder(order),
                     hash: order_hash.to_string(),
@@ -555,16 +515,17 @@ impl UniswapXPriorityFill {
                     encoded_order: None,
                     route: route,
                 };
-                self.new_orders.remove(&order_hash);
-                self.processing_orders
-                    .insert(order_hash.to_string(), order_data.clone());
+                if let Some(route) = &order_data.route {
+                    if !route.method_parameters.calldata.is_empty() {
+                        info!("{} - Received cached route for order", order_hash);
+                    }
+                }
                 info!(
-                    "{} - Sending order for routing and execution at latest block {}",
-                    order_hash,
-                    *self.last_block_number.read().await
+                    "{} - Requesting fresh route for order",
+                    order_hash
                 );
                 let order_batch = self.get_order_batch(&order_data);
-                self.try_send_order_batch(order_batch, order_hash, order_data)
+                self.try_route_order_batch(order_batch, order_hash)
                     .await;
             }
         }
@@ -587,7 +548,7 @@ impl UniswapXPriorityFill {
 
     /// check all new orders we are tracking
     /// if they are now fillable at the latest block, move then to self.processing_orders and send for execution
-    async fn check_new_orders_for_processing(&mut self) {
+    async fn check_new_orders_for_processing(&mut self) -> Vec<Action> {
         let order_hashes = self
             .new_orders
             .iter()
@@ -616,24 +577,143 @@ impl UniswapXPriorityFill {
                 }
             }
         }
+
+        // After processing orders, check if any can be submitted
+        return self.check_orders_for_submission().await
     }
 
-    async fn try_send_order_batch(
+    async fn try_route_order_batch(
         &self,
         order_batch: OrderBatchData,
         order_hash: String,
-        order_data: OrderData,
     ) {
         match self.batch_sender.send(vec![order_batch]).await {
             Ok(_) => (),
             Err(e) => {
                 error!(
-                    "{} - Failed to send batch: {}; moving order back to new_orders",
+                    "{} - Failed to send batch: {}",
                     order_hash, e
                 );
-                self.processing_orders.remove(&order_hash);
-                self.new_orders.insert(order_hash.clone(), order_data);
             }
         }
+    }
+
+    async fn check_orders_for_submission(&self) -> Vec<Action> {
+        let order_hashes: Vec<String> = self.new_orders
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let mut actions = Vec::new();
+
+        for order_hash in order_hashes {
+            if let Some(order_data) = self.new_orders.get(&order_hash) {
+                // Skip if no route available
+                if order_data.route.is_none() {
+                    continue;
+                }
+                // skip if order is already in processing_orders
+                if self.processing_orders.contains_key(&order_hash) {
+                    continue;
+                }
+
+                // Check if order is now fillable
+                let order = match &order_data.order {
+                    Order::PriorityOrder(order) => order,
+                    _ => continue,
+                };
+
+                match self.get_order_status(order).await {
+                    OrderStatus::Done => {
+                        self.new_orders.remove(&order_hash);
+                        self.processing_orders.remove(&order_hash);
+                        self.done_orders.insert(
+                            order_hash,
+                            self.current_timestamp().unwrap_or(0) + DONE_EXPIRY,
+                        );
+                        continue;
+                    }
+                    OrderStatus::NotFillableYet(_) => {
+                        continue;
+                    }
+                    OrderStatus::Open(_) => {
+                        // if already in processing_orders, skip (prevent race condition)
+                        if self.processing_orders.contains_key(&order_hash) {
+                            continue;
+                        }
+                        else {
+                            self.processing_orders.insert(order_hash.clone(), order_data.value().clone());
+                        }
+
+                        let routed_order = RoutedOrder {
+                            request: OrderBatchData {
+                                orders: vec![order_data.value().clone()],
+                                amount_in: order_data.resolved.input.amount,
+                                amount_out_required: order_data.resolved.outputs.iter()
+                                    .fold(Uint::from(0), |sum, output| sum.wrapping_add(output.amount)),
+                                token_in: order_data.resolved.input.token.clone(),
+                                token_out: order_data.resolved.outputs[0].token.clone(),
+                                chain_id: self.chain_id,
+                            },
+                            route: OrderRoute {
+                                quote: order_data.route.as_ref().unwrap().quote.clone(),
+                                quote_gas_adjusted: order_data.route.as_ref().unwrap().quote_gas_adjusted.clone(),
+                                gas_price_wei: order_data.route.as_ref().unwrap().gas_price_wei.clone(),
+                                gas_use_estimate_quote: order_data.route.as_ref().unwrap().gas_use_estimate_quote.clone(),
+                                gas_use_estimate: order_data.route.as_ref().unwrap().gas_use_estimate.clone(),
+                                route: vec![],
+                                method_parameters: order_data.route.as_ref().unwrap().method_parameters.clone(),
+                            },
+                            target_block: Some(order.cosignerData.auctionTargetBlock),
+                        };
+
+                        info!(
+                            "{} - Order is now fillable, attempting submission with existing route",
+                            order_hash
+                        );
+
+                        match self.build_fill(
+                            self.client.clone(),
+                            &self.executor_address,
+                            self.get_signed_orders(vec![order_data.value().clone()]).unwrap(),
+                            &routed_order,
+                        ).await {
+                            Ok(fill_tx_request) => {
+                                info!("{} - Successfully built fill transaction", order_hash);
+                                let metadata = self.get_execution_metadata(&routed_order);
+                                match metadata {
+                                    Some(metadata) => {
+                                        let action = Action::SubmitPublicTx(
+                                            SubmitTxToMempoolWithExecutionMetadata {
+                                                execution: SubmitTxToMempool {
+                                                    tx: fill_tx_request.clone(),
+                                                    gas_bid_info: Some(GasBidInfo {
+                                                        bid_percentage: U128::from(self.bid_percentage),
+                                                        // this field is not used for priority orders
+                                                        total_profit: U128::from(0),
+                                                    }),
+                                                },
+                                                metadata: metadata.clone(),
+                                            },
+                                        );
+                                        actions.push(action);
+                                        info!("{} - Successfully queued transaction for submission", order_hash);
+                                    }
+                                    None => {
+                                        warn!("{} - Failed to get execution metadata - trade may be unprofitable", order_hash);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("{} - Error building fill transaction: {}", order_hash, e);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        actions
     }
 }
