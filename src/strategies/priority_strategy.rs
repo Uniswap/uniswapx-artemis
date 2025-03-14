@@ -35,7 +35,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
     RwLock,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, PriorityOrder, MPS};
 
 use super::types::{Action, Event};
@@ -283,7 +283,7 @@ impl UniswapXPriorityFill {
                 );
             }
             OrderStatus::Done => {
-                info!("{} - Order already done, skipping", order_hash);
+                debug!("{} - Order already done, skipping", order_hash);
             }
         }
 
