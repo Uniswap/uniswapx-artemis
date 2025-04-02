@@ -133,6 +133,35 @@ pub trait UniswapXStrategy {
             .checked_div(U256::from_str_radix(&route.gas_use_estimate_quote, 10).ok()?)
     }
 
+    /// Converts the quote amount to ETH equivalent value
+    /// 
+    /// For WETH output tokens, returns the quote directly since it's already in ETH.
+    /// For non-WETH output tokens, converts using the following formula:
+    /// quote_eth = quote * gas_wei / gas_in_quote
+    /// 
+    /// # Arguments
+    /// * `request` - The order request containing token information
+    /// * `route` - The route containing quote and gas estimates
+    /// 
+    /// # Returns
+    /// * `Some(U256)` - The quote value in ETH
+    /// * `None` - If any conversion fails or division by zero would occur
+    fn get_quote_eth(&self, RoutedOrder { request, route, .. }: &RoutedOrder) -> Option<U256> {
+        let quote = U256::from_str_radix(&route.quote, 10).ok()?;
+
+        // If output token is WETH, quote is already in ETH
+        if request.token_out.to_lowercase() == WETH_ADDRESS.to_lowercase() {
+            return Some(quote);
+        }
+
+        let gas_use_eth = U256::from_str_radix(&route.gas_use_estimate, 10)
+            .ok()?
+            .saturating_mul(U256::from_str_radix(&route.gas_price_wei, 10).ok()?);
+        quote
+            .saturating_mul(gas_use_eth)
+            .checked_div(U256::from_str_radix(&route.gas_use_estimate_quote, 10).ok()?)
+    }
+
     /// Get the minimum gas price on Arbitrum
     /// https://docs.arbitrum.io/build-decentralized-apps/precompiles/reference#arbgasinfo
     async fn get_arbitrum_min_gas_price(

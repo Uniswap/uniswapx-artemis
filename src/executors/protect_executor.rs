@@ -1,4 +1,5 @@
 use alloy_primitives::{utils::format_units, U128};
+use uniswapx_rs::order::BPS;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -150,7 +151,7 @@ impl Executor<SubmitTxToMempool> for ProtectExecutor {
             // gas price at which we'd break even, meaning 100% of profit goes to validator
             let breakeven_gas_price = gas_bid_info.total_profit / U128::from(gas_usage);
             // gas price corresponding to bid percentage
-            bid_gas_price = breakeven_gas_price * gas_bid_info.bid_percentage / U128::from(100);
+            bid_gas_price = breakeven_gas_price * gas_bid_info.bid_percentage / U128::from(BPS);
         } else {
             bid_gas_price = self
                 .client

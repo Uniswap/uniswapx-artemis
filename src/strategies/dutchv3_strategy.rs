@@ -49,8 +49,8 @@ pub struct UniswapXDutchV3Fill {
     client: Arc<DynProvider<AnyNetwork>>,
     /// executor address
     executor_address: String,
-    /// Amount of profits to bid in gas
-    bid_percentage: u128,
+    /// Amount of profits to bid in gas (as basis points)
+    bid_bps: u128,
     last_block_number: u64,
     last_block_timestamp: u64,
     // map of open order hashes to order data
@@ -79,7 +79,7 @@ impl UniswapXDutchV3Fill {
         Self {
             client,
             executor_address: config.executor_address,
-            bid_percentage: config.bid_percentage,
+            bid_bps: config.bid_bps,
             last_block_number: 0,
             last_block_timestamp: 0,
             open_orders: HashMap::new(),
@@ -219,8 +219,8 @@ impl UniswapXDutchV3Fill {
                     // gas price at which we'd break even, meaning 100% of profit goes to validator
                     let breakeven_gas_price = profit / U256::from(gas_usage);
                     // gas price corresponding to bid percentage
-                    let bid_gas_price = breakeven_gas_price
-                        .mul(U256::from(self.bid_percentage))
+                    let bid_gas_price: Uint<256, 4> = breakeven_gas_price
+                        .mul(U256::from(self.bid_bps))
                         .div(U256::from(100));
                     if bid_gas_price < min_gas_price {
                         info!(
@@ -236,7 +236,7 @@ impl UniswapXDutchV3Fill {
                     return vec![Action::SubmitTx(SubmitTxToMempool {
                         tx: req,
                         gas_bid_info: Some(GasBidInfo {
-                            bid_percentage: U128::from(self.bid_percentage),
+                            bid_percentage: U128::from(self.bid_bps),
                             total_profit: U128::from(profit),
                         }),
                     })];

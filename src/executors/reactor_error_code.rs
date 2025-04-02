@@ -14,6 +14,8 @@ pub enum ReactorErrorCode {
     OrderAlreadyFilled,
     InsufficientETH,
     InsufficientToken,
+    NativeTransferFailed,
+    AllowanceExpired,
     Unknown,
 }
 
@@ -22,12 +24,21 @@ impl From<String> for ReactorErrorCode {
     fn from(s: String) -> Self {
         // Remove quotes and whitespace before matching
         let cleaned = s.trim().trim_matches('\"');
-        match cleaned {
+        // Take first 10 chars (including 0x) if longer
+        let code = if cleaned.len() > 10 {
+            &cleaned[..10]
+        } else {
+            cleaned
+        };
+        
+        match code {
             "0xc6035520" => ReactorErrorCode::OrderNotFillable,
             "0xee3b3d4b" => ReactorErrorCode::OrderAlreadyFilled,
             "0x769d11e4" => ReactorErrorCode::InvalidDeadline,
             "0x6a12f104" => ReactorErrorCode::InsufficientETH,
             "0x675cae38" => ReactorErrorCode::InsufficientToken,
+            "0xf4b3b1bc" => ReactorErrorCode::NativeTransferFailed,
+            "0xd81b2f2e" => ReactorErrorCode::AllowanceExpired,
             _ => ReactorErrorCode::Unknown,
         }
     }
@@ -41,6 +52,8 @@ impl std::fmt::Display for ReactorErrorCode {
             ReactorErrorCode::OrderAlreadyFilled => "OrderAlreadyFilled",
             ReactorErrorCode::InsufficientETH => "InsufficientETH",
             ReactorErrorCode::InsufficientToken => "InsufficientToken",
+            ReactorErrorCode::NativeTransferFailed => "NativeTransferFailed",
+            ReactorErrorCode::AllowanceExpired => "AllowanceExpired",
             ReactorErrorCode::Unknown => "Unknown",
         };
         write!(f, "{}", s)

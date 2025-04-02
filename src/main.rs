@@ -68,9 +68,10 @@ pub struct Args {
     #[arg(long, group = "key_source")]
     pub aws_secret_arn: Option<String>,
 
-    /// Percentage of profit to pay in gas.
+    /// Percentage of profit to pay in gas (as basis points).
+    /// Example: 9950 = 99.5%
     #[arg(long, required = true)]
-    pub bid_percentage: u128,
+    pub bid_bps: u128,
 
     /// Private key for sending txs.
     #[arg(long, required = true)]
@@ -232,7 +233,7 @@ async fn main() -> Result<()> {
     engine.add_collector(Box::new(uniswapx_route_collector));
 
     let config = Config {
-        bid_percentage: args.bid_percentage,
+        bid_bps: args.bid_bps,
         executor_address: args.executor_address,
     };
 
