@@ -248,6 +248,12 @@ impl UniswapXPriorityFill {
             .ok()
             .unwrap();
 
+        // Skip EXACT_OUTPUT orders for now
+        if order.outputs.iter().any(|o| o.mpsPerPriorityFeeWei == U256::from(0)) {
+            info!("{} - Skipping EXACT_OUTPUT order", event.order_hash);
+            return self.check_orders_for_submission().await;
+        }
+
         let order_hash = event.order_hash.clone();
 
         match self.get_order_status(&order).await {
