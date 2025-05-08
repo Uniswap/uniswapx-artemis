@@ -91,7 +91,7 @@ pub struct Args {
     #[arg(long, required = true)]
     pub executor_address: String,
 
-    /// Whether to use revert protection for priority orders.
+    /// Whether the chain uses revert protection.
     #[arg(long, required = false)]
     pub revert_protection: bool,
 
