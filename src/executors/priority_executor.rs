@@ -27,8 +27,6 @@ use crate::{
 use crate::executors::reactor_error_code::get_revert_reason;
 
 const GAS_LIMIT: u64 = 1_000_000;
-const MAX_RETRIES: u32 = 3;
-const TX_BACKOFF_MS: u64 = 0; // retry immediately
 static QUOTE_BASED_PRIORITY_BID_BUFFER: U256 = u256!(2);
 static GWEI_PER_ETH: U256 = u256!(1_000_000_000);
 const QUOTE_ETH_LOG10_THRESHOLD: usize = 8;
@@ -262,6 +260,35 @@ impl PriorityExecutor {
 
         bid_priority_fees
     }
+
+    /// @notice Assigns nonces to transaction requests
+    /// @param tx_requests Mutable slice of transaction requests to assign nonces to
+    /// @param address Ethereum address to get nonce for
+    /// @param order_hash Order hash for logging
+    /// @param revert_protection Whether to use same nonce for all transactions
+    async fn assign_nonces(
+        &self,
+        tx_requests: &mut [WithOtherFields<TransactionRequest>],
+        nonce: u64,
+        revert_protection: bool,
+    ) {
+        // Sort transactions by max_priority_fee_per_gas in descending order so that the highest bid is first
+        tx_requests.sort_by(|a, b| {
+            let a_fee = a.max_priority_fee_per_gas().unwrap();
+            let b_fee = b.max_priority_fee_per_gas().unwrap();
+            b_fee.cmp(&a_fee)
+        });
+
+        // With revert protection, we must use the same nonce for all transactions,
+        // otherwise the reverted txs will sit in the mempool and block all nonces above it
+        let mut current_nonce = nonce;
+        for tx_request in tx_requests.iter_mut() {
+            tx_request.set_nonce(current_nonce);
+            if !revert_protection {
+                current_nonce += 1;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -372,21 +399,11 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
 
             // Retry up to 3 times to get the nonce.
-            let mut nonce = get_nonce_with_retry(&self.client, address, &order_hash, 3).await?;
+            let nonce = get_nonce_with_retry(&self.client, address, &order_hash, 3).await
+                .context("Failed to get nonce after retries")?;
             info!("{} - Nonce: {}", order_hash, nonce);
 
-            // Sort transactions by max_priority_fee_per_gas in descending order so that the highest bid is first
-            tx_requests.sort_by(|a, b| {
-                let a_fee = a.max_priority_fee_per_gas().unwrap();
-                let b_fee = b.max_priority_fee_per_gas().unwrap();
-                b_fee.cmp(&a_fee)
-            });
-
-            // Set unique nonces for each transaction
-            for tx_request in tx_requests.iter_mut() {
-                tx_request.set_nonce(nonce);
-                nonce += 1;
-            }
+            self.assign_nonces(&mut tx_requests, nonce, action.metadata.revert_protection).await;
 
             let metric_future = build_metric_future(
                 self.cloudwatch_client.clone(),
@@ -399,82 +416,55 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
             info!("{} - Executing {} transactions in parallel from {:?}", order_hash, tx_requests.len(), address);
 
-            let mut attempts = 0;
             let mut success = false;
             let mut block_number = None;
-            let mut retryable_failure = true;
-            
-            // Retry tx submission on retryable failures if none of the transactions succeeded
-            while attempts < MAX_RETRIES && !success && retryable_failure {
 
-                let metric_future = build_metric_future(
-                    self.cloudwatch_client.clone(),
-                    DimensionValue::PriorityExecutor,
-                    CwMetrics::TxSubmitted(chain_id),
-                    1.0,
-                );
-                if let Some(metric_future) = metric_future {
-                    send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
-                }
+            let metric_future = build_metric_future(
+                self.cloudwatch_client.clone(),
+                DimensionValue::PriorityExecutor,
+                CwMetrics::TxSubmitted(chain_id),
+                1.0,
+            );
+            if let Some(metric_future) = metric_future {
+                send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
+            }
 
-                // Create futures for all transactions
-                let futures: Vec<_> = tx_requests.iter().map(|tx_request| {
-                    self.send_transaction(&wallet, tx_request.clone(), &order_hash, chain_id_u64, target_block.as_u64())
-                }).collect();
+            // Create futures for all transactions
+            let futures: Vec<_> = tx_requests.iter().map(|tx_request| {
+                self.send_transaction(&wallet, tx_request.clone(), &order_hash, chain_id_u64, target_block.as_u64())
+            }).collect();
 
-                // Wait for all transactions to complete
-                let results = futures::future::join_all(futures).await;
+            // Wait for all transactions to complete
+            let results = futures::future::join_all(futures).await;
 
-                // Check results
-                retryable_failure = false;
-                for (i, result) in results.iter().enumerate() {
-                    self.increment_tx_metric(&order_hash, chain_id, result);
-                    match result {
-                        Ok(TransactionOutcome::Success(result)) => {
-                            success = true;
+            // Check results
+            for (i, result) in results.iter().enumerate() {
+                self.increment_tx_metric(&order_hash, chain_id, result);
+                match result {
+                    Ok(TransactionOutcome::Success(result)) => {
+                        success = true;
+                        block_number = *result;
+
+                        let metric_future = build_metric_future(
+                            self.cloudwatch_client.clone(),
+                            DimensionValue::PriorityExecutor,
+                            CwMetrics::OrderFilled(chain_id_u64),
+                            1.0,
+                        );
+                        if let Some(metric_future) = metric_future {
+                            send_metric_with_order_hash!(&order_hash, metric_future);
+                        }
+                        info!("{} - Transaction {} succeeded at block {}", order_hash, i, block_number.unwrap());
+                        break;
+                    }
+                    Ok(TransactionOutcome::Failure(result)) => {
+                        if i == results.len() - 1 {
                             block_number = *result;
-
-                            let metric_future = build_metric_future(
-                                self.cloudwatch_client.clone(),
-                                DimensionValue::PriorityExecutor,
-                                CwMetrics::OrderFilled(chain_id_u64),
-                                1.0,
-                            );
-                            if let Some(metric_future) = metric_future {
-                                send_metric_with_order_hash!(&order_hash, metric_future);
-                            }
-                            info!("{} - Transaction {} succeeded at block {}", order_hash, i, block_number.unwrap());
-                            break;
-                        }
-                        Ok(TransactionOutcome::Failure(result)) => {
-                            if i == results.len() - 1 {
-                                block_number = *result;
-                            }
-                            // Find the transaction that won the bid and compare the winning bid to our own bid
-                            
-                        }
-                        Ok(TransactionOutcome::RetryableFailure) => {
-                            retryable_failure = true;
-                            // Continue to next attempt
-                        }
-                        Err(_) => {
-                            // Continue to next attempt
                         }
                     }
-                }
-
-                if !success && attempts < MAX_RETRIES - 1 {
-                    attempts += 1;
-                    info!(
-                        "{} - All transactions failed, retrying in {}ms (attempt {}/{})",
-                        order_hash, TX_BACKOFF_MS, attempts, MAX_RETRIES
-                    );
-                    // Update nonces for next attempt
-                    for tx_request in tx_requests.iter_mut() {
-                        tx_request.set_nonce(nonce);
-                        nonce += 1;
+                    Ok(TransactionOutcome::RetryableFailure) | Err(_) => {
+                        // Skip the order for now
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(TX_BACKOFF_MS)).await;
                 }
             }
 
@@ -585,6 +575,7 @@ mod tests {
                 order_hash: "test_hash".to_string(),
                 target_block: target_block.map(|b| U64::from(b)),
                 fallback_bid_scale_factor: Some(DEFAULT_FALLBACK_BID_SCALE_FACTOR),
+                revert_protection: false,
             },
         };
         action
@@ -716,5 +707,88 @@ mod tests {
 
         let bids = executor.get_bids_for_order(&action, "test_hash");
         assert_eq!(bids.len(), 1 + 8); // 1 quote-based bid + max of 8 additional fallback bids (based on underflow check)
+    }
+
+    #[tokio::test]
+    async fn test_assign_nonces_with_revert_protection() {
+        let executor = PriorityExecutor::new(
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(KeyStore::new()),
+            None,
+        );
+
+        let mut tx_requests = vec![
+            WithOtherFields::new(TransactionRequest::default()),
+            WithOtherFields::new(TransactionRequest::default()),
+            WithOtherFields::new(TransactionRequest::default()),
+        ];
+
+        // Set different priority fees to test sorting
+        tx_requests[0].set_max_priority_fee_per_gas(100);
+        tx_requests[1].set_max_priority_fee_per_gas(300);
+        tx_requests[2].set_max_priority_fee_per_gas(200);
+
+        executor.assign_nonces(&mut tx_requests, 42, true).await;
+
+        // Verify all transactions have the same nonce (42)
+        assert_eq!(tx_requests[0].nonce().unwrap(), 42);
+        assert_eq!(tx_requests[1].nonce().unwrap(), 42);
+        assert_eq!(tx_requests[2].nonce().unwrap(), 42);
+
+        // Verify transactions are sorted by priority fee
+        assert_eq!(tx_requests[0].max_priority_fee_per_gas().unwrap(), 300);
+        assert_eq!(tx_requests[1].max_priority_fee_per_gas().unwrap(), 200);
+        assert_eq!(tx_requests[2].max_priority_fee_per_gas().unwrap(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_assign_nonces_without_revert_protection() {
+        let executor = PriorityExecutor::new(
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(KeyStore::new()),
+            None,
+        );
+
+        let mut tx_requests = vec![
+            WithOtherFields::new(TransactionRequest::default()),
+            WithOtherFields::new(TransactionRequest::default()),
+            WithOtherFields::new(TransactionRequest::default()),
+        ];
+
+        // Set different priority fees to test sorting
+        tx_requests[0].set_max_priority_fee_per_gas(100);
+        tx_requests[1].set_max_priority_fee_per_gas(300);
+        tx_requests[2].set_max_priority_fee_per_gas(200);
+
+
+        executor.assign_nonces(&mut tx_requests, 42, false).await;
+
+        // Verify transactions have incrementing nonces starting from 42
+        assert_eq!(tx_requests[0].nonce().unwrap(), 42);
+        assert_eq!(tx_requests[1].nonce().unwrap(), 43);
+        assert_eq!(tx_requests[2].nonce().unwrap(), 44);
+
+        // Verify transactions are sorted by priority fee
+        assert_eq!(tx_requests[0].max_priority_fee_per_gas().unwrap(), 300);
+        assert_eq!(tx_requests[1].max_priority_fee_per_gas().unwrap(), 200);
+        assert_eq!(tx_requests[2].max_priority_fee_per_gas().unwrap(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_assign_nonces_empty_requests() {
+        let executor = PriorityExecutor::new(
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(DynProvider::new(MockProvider)),
+            Arc::new(KeyStore::new()),
+            None,
+        );
+
+        let mut tx_requests: Vec<WithOtherFields<TransactionRequest>> = vec![];
+
+        // Should not panic with empty requests
+        executor.assign_nonces(&mut tx_requests, 42, true).await;
+        assert!(tx_requests.is_empty());
     }
 }

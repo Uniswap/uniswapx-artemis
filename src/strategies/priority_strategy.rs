@@ -66,6 +66,7 @@ pub struct ExecutionMetadata {
     pub order_hash: String,
     pub target_block: Option<U64>,
     pub fallback_bid_scale_factor: Option<u64>,
+    pub revert_protection: bool,
 }
 
 impl ExecutionMetadata {
@@ -78,6 +79,7 @@ impl ExecutionMetadata {
         order_hash: &str,
         target_block: Option<U64>,
         fallback_bid_scale_factor: Option<u64>,
+        revert_protection: bool,
     ) -> Self {
         Self {
             quote,
@@ -88,6 +90,7 @@ impl ExecutionMetadata {
             order_hash: order_hash.to_owned(),
             target_block,
             fallback_bid_scale_factor,
+            revert_protection,
         }
     }
 
@@ -168,6 +171,7 @@ pub struct UniswapXPriorityFill {
     executor_address: String,
     min_block_percentage_buffer: Option<u64>,
     fallback_bid_scale_factor: Option<u64>,
+    revert_protection: bool,
     last_block_number: RwLock<u64>,
     last_block_timestamp: RwLock<u64>,
     // map of new order hashes to order data
@@ -198,6 +202,7 @@ impl UniswapXPriorityFill {
             executor_address: config.executor_address,
             min_block_percentage_buffer: config.min_block_percentage_buffer,
             fallback_bid_scale_factor: config.fallback_bid_scale_factor,
+            revert_protection: config.revert_protection,
             last_block_number: RwLock::new(0),
             last_block_timestamp: RwLock::new(0),
             new_orders: Arc::new(DashMap::new()),
@@ -297,23 +302,6 @@ impl UniswapXPriorityFill {
             );
             return self.check_orders_for_submission().await;
         }
-        if let Some(cw) = &self.cloudwatch_client {
-            let metric_future = cw
-                .put_metric_data()
-                .namespace(ARTEMIS_NAMESPACE)
-                .metric_data(
-                    MetricBuilder::new(CwMetrics::OrderReceived(self.chain_id))
-                        .add_dimension(DimensionName::Service.as_ref(), DimensionValue::PriorityExecutor.as_ref())
-                        .with_value(1.0)
-                        .build(),
-                )
-                .send();
-            tokio::spawn(async move {
-                if let Err(e) = metric_future.await {
-                    warn!("Error sending order received metric: {:?}", e);
-                }
-            });
-        }
 
         let order = self
             .decode_order(&event.encoded_order)
@@ -348,6 +336,24 @@ impl UniswapXPriorityFill {
                     if !route.method_parameters.calldata.is_empty() {
                         info!("{} - Received cached route for order with quote: {}", order_hash, route.quote);
                     }
+                }
+
+                if let Some(cw) = &self.cloudwatch_client {
+                    let metric_future = cw
+                        .put_metric_data()
+                        .namespace(ARTEMIS_NAMESPACE)
+                        .metric_data(
+                            MetricBuilder::new(CwMetrics::OrderReceived(self.chain_id))
+                                .add_dimension(DimensionName::Service.as_ref(), DimensionValue::PriorityExecutor.as_ref())
+                                .with_value(1.0)
+                                .build(),
+                        )
+                        .send();
+                    tokio::spawn(async move {
+                        if let Err(e) = metric_future.await {
+                            warn!("Error sending order received metric: {:?}", e);
+                        }
+                    });
                 }
                 self.new_orders.insert(order_hash.clone(), order_data.clone());
 
@@ -558,6 +564,7 @@ impl UniswapXPriorityFill {
                 order_hash: routed_order.request.orders[0].hash.clone(),
                 target_block: routed_order.target_block.map(|b| U64::from(b)),
                 fallback_bid_scale_factor: self.fallback_bid_scale_factor.clone(),
+                revert_protection: self.revert_protection,
             }
         })
     }
@@ -827,6 +834,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let bid_bps = U128::from(5000); // 50%
@@ -847,6 +855,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -862,6 +871,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -877,6 +887,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -896,6 +907,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let zero_bid_bps = U128::from(0);
@@ -917,6 +929,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let bid_bps = U128::from(5000); // 50%
@@ -936,7 +949,8 @@ mod tests {
             U256::from(50),    // gas_use_estimate_quote
             "test_hash",
             None,
-            None
+            None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -952,6 +966,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -967,6 +982,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let result = metadata.calculate_priority_fee(bid_bps);
@@ -986,6 +1002,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         let zero_bid_bps = U128::from(0);
@@ -1006,6 +1023,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 2x
@@ -1026,6 +1044,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x
@@ -1044,6 +1063,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x
@@ -1064,6 +1084,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x (900 + 200 > 1000)
@@ -1081,6 +1102,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 2x
@@ -1104,6 +1126,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 2x
@@ -1124,6 +1147,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x (999 > 1000 - 2)
@@ -1141,6 +1165,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x (900 < 1000 - 99)
@@ -1161,6 +1186,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 1x (900 > 1000 - 200)
@@ -1178,6 +1204,7 @@ mod tests {
             "test_hash",
             None,
             None,
+            false,
         );
         
         // With gas buffer of 2x
