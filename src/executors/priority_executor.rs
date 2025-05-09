@@ -46,6 +46,7 @@ pub struct PriorityExecutor {
 enum TransactionOutcome {
     Success(Option<u64>),
     Failure(Option<u64>),
+    TimedOut(Option<u64>),
     RetryableFailure,
 }
 
@@ -113,8 +114,8 @@ impl PriorityExecutor {
                         anyhow::anyhow!("{} - Error waiting for confirmations: {}", order_hash, e)
                     }),
                     Err(_) => {
-                        warn!("{} - Timed out waiting for transaction receipt", order_hash);
-                        return Ok(TransactionOutcome::Failure(None));
+                        warn!("{} - Timed out waiting for transaction receipt attempting to burn nonce", order_hash);
+                        return Ok(TransactionOutcome::TimedOut(None));
                     }
                 };
                 
@@ -465,6 +466,21 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                     Ok(TransactionOutcome::RetryableFailure) | Err(_) => {
                         // Skip the order for now
                     }
+                    Ok(TransactionOutcome::TimedOut(_result)) => {
+                        // no successes and revert protection is enabled, burn nonce
+                        // this is to allow the next tx from this wallet to be submitted
+                        // it may be that one order succeeded, but the others timed out
+                        // however, we only want to burn the nonce if all txs timed out
+                        if i == results.len() - 1 && action.metadata.revert_protection {
+                            burn_nonce(
+                                &self.sender_client,
+                                &wallet,
+                                address,
+                                nonce,
+                                &order_hash
+                            ).await?;
+                        }
+                    }   
                 }
             }
 
