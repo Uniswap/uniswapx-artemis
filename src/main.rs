@@ -91,6 +91,10 @@ pub struct Args {
     #[arg(long, required = true)]
     pub executor_address: String,
 
+    /// Whether the chain uses revert protection.
+    #[arg(long, required = false)]
+    pub revert_protection: bool,
+
     /// Order type to use.
     #[arg(long, required = true)]
     pub order_type: OrderType,
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
         fallback_bid_scale_factor: args.fallback_bid_scale_factor,
         min_block_percentage_buffer: args.min_block_percentage_buffer,
         executor_address: args.executor_address,
+        revert_protection: args.revert_protection,
     };
 
     match &args.order_type {
