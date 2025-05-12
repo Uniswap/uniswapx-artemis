@@ -75,7 +75,7 @@ impl PriorityExecutor {
             let metric = match outcome {
                 Ok(TransactionOutcome::Success(_)) => CwMetrics::TxSucceeded(chain_id),
                 Ok(TransactionOutcome::Failure(_)) | Ok(TransactionOutcome::RetryableFailure) => CwMetrics::TxReverted(chain_id),
-                Err(_) => CwMetrics::TxStatusUnknown(chain_id),
+                Ok(TransactionOutcome::TimedOut(_)) | Err(_) => CwMetrics::TxStatusUnknown(chain_id),
             };
             
             let metric_future = build_metric_future(
