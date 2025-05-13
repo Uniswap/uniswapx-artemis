@@ -3,13 +3,6 @@ use anyhow::Result;
 use backoff::ExponentialBackoff;
 use clap::{ArgGroup, Parser};
 
-use artemis_core::engine::Engine;
-use artemis_core::types::{CollectorMap, ExecutorMap};
-use collectors::uniswapx_order_collector::OrderType;
-use collectors::{
-    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
-    uniswapx_route_collector::UniswapXRouteCollector,
-};
 use alloy::{
     hex,
     network::AnyNetwork,
@@ -18,12 +11,20 @@ use alloy::{
     signers::local::PrivateKeySigner,
     transports::{impl_future, TransportResult},
 };
+use artemis_core::engine::Engine;
+use artemis_core::types::{CollectorMap, ExecutorMap};
+use collectors::uniswapx_order_collector::OrderType;
+use collectors::{
+    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
+    uniswapx_route_collector::UniswapXRouteCollector,
+};
 use executors::dutch_executor::DutchExecutor;
 use executors::queued_executor::QueuedExecutor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::dutchv3_strategy::UniswapXDutchV3Fill;
 use strategies::keystore::KeyStore;
+use strategies::limit_strategy::LimitOrderFill;
 use strategies::priority_strategy::UniswapXPriorityFill;
 use strategies::{
     types::{Action, Config, Event},
@@ -157,7 +158,7 @@ async fn main() -> Result<()> {
     let chain_id = args.chain_id;
     let mut client = None;
     let mut sender_client = None;
-    
+
     if let Some(wss) = args.wss {
         let ws = WsConnect::new(wss.as_str());
         let retry_ws = RetryWsConnect(ws);
@@ -166,7 +167,7 @@ async fn main() -> Result<()> {
         let wss_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(wss_client)
+                .on_client(wss_client),
         ));
         client = Some(wss_provider.clone());
         sender_client = Some(wss_provider.clone());
@@ -180,7 +181,7 @@ async fn main() -> Result<()> {
         let http_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(http_client)
+                .on_client(http_client),
         ));
         // prefer http provider for sending txs
         sender_client = Some(http_provider.clone());
@@ -314,6 +315,17 @@ async fn main() -> Result<()> {
 
             engine.add_strategy(Box::new(priority_strategy));
         }
+        OrderType::LimitOrder => {
+            let limit_order_strategy = LimitOrderFill::new(
+                client.clone().unwrap(),
+                config.clone(),
+                batch_sender,
+                route_receiver,
+                cloudwatch_client.clone(),
+                chain_id,
+            );
+            engine.add_strategy(Box::new(limit_order_strategy));
+        }
     }
 
     let queued_executor = Box::new(QueuedExecutor::new(
@@ -340,7 +352,6 @@ async fn main() -> Result<()> {
         // No op for public transactions
         _ => None,
     });
-
 
     engine.add_executor(Box::new(queued_executor));
     engine.add_executor(Box::new(protect_executor));
