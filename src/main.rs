@@ -185,11 +185,11 @@ async fn main() -> Result<()> {
         // prefer http provider for sending txs
         sender_client = Some(http_provider.clone());
         // prefer wss provider for fetching blocks
-        if !client.is_some() {
+        if client.is_none() {
             client = Some(http_provider.clone());
         }
     }
-    if !client.is_some() {
+    if client.is_none() {
         panic!("No provider found. Please provide either a WSS endpoint (--wss) or an HTTP endpoint (--http).");
     }
 
@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
     ));
 
     let queued_executor = ExecutorMap::new(queued_executor, |action| match action {
-        Action::SubmitPublicTx(tx) => Some(tx),
+        Action::SubmitPublicTx(tx) => Some(*tx),
         _ => None,
     });
 
@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
     ));
 
     let protect_executor = ExecutorMap::new(protect_executor, |action| match action {
-        Action::SubmitTx(tx) => Some(tx),
+        Action::SubmitTx(tx) => Some(*tx),
         // No op for public transactions
         _ => None,
     });

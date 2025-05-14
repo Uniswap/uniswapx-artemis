@@ -24,8 +24,8 @@ pub struct SubmitTxToMempoolWithExecutionMetadata {
 /// Core Action enum for the current strategy.
 #[derive(Debug, Clone)]
 pub enum Action {
-    SubmitTx(SubmitTxToMempool),
-    SubmitPublicTx(SubmitTxToMempoolWithExecutionMetadata),
+    SubmitTx(Box<SubmitTxToMempool>),
+    SubmitPublicTx(Box<SubmitTxToMempoolWithExecutionMetadata>),
 }
 
 /// Configuration for variables we need to pass to the strategy.

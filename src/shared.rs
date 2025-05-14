@@ -140,11 +140,11 @@ pub async fn burn_nonce(
                 }
                 Err(e) => {
                     tracing::error!("{} - Error burning nonce: {}", order_hash, e);
-                    return Err(anyhow::anyhow!(
+                    Err(anyhow::anyhow!(
                         "{} - Error burning nonce: {}",
                         order_hash,
                         e
-                    ));
+                    ))
                 }
             }
         }
@@ -154,11 +154,11 @@ pub async fn burn_nonce(
                 order_hash,
                 e
             );
-            return Err(anyhow::anyhow!(
+            Err(anyhow::anyhow!(
                 "{} - Error sending nonce burn transaction: {}",
                 order_hash,
                 e
-            ));
+            ))
         }
     }
 }

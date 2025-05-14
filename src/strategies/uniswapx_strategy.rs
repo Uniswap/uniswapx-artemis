@@ -182,13 +182,13 @@ impl UniswapXUniswapFill {
                 .await;
             match fill_tx_request {
                 Ok(fill_tx_request) => {
-                    return vec![Action::SubmitTx(SubmitTxToMempool {
+                    return vec![Action::SubmitTx(Box::new(SubmitTxToMempool {
                         tx: fill_tx_request,
                         gas_bid_info: Some(GasBidInfo {
                             bid_percentage: self.bid_percentage,
                             total_profit: profit.to(),
                         }),
-                    })];
+                    }))];
                 }
                 Err(e) => {
                     warn!(

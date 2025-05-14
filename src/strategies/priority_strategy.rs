@@ -69,6 +69,7 @@ pub struct ExecutionMetadata {
 }
 
 impl ExecutionMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         quote: U256,
         quote_eth: Option<U256>,
@@ -263,10 +264,10 @@ impl UniswapXPriorityFill {
         };
 
         let order_hex =
-            hex::decode(encoded_order).map_err(|e| format!("Failed to decode hex: {}", e))?;
+            hex::decode(encoded_order).map_err(|e| format!("Failed to decode hex: {e}"))?;
 
         PriorityOrder::decode_inner(&order_hex, false)
-            .map_err(|e| format!("Failed to decode order: {}", e).into())
+            .map_err(|e| format!("Failed to decode order: {e}").into())
     }
 
     async fn get_order_status(&self, order: &PriorityOrder) -> OrderStatus {
@@ -277,12 +278,12 @@ impl UniswapXPriorityFill {
             Uint::from(0),
             self.min_block_percentage_buffer.unwrap_or(100),
         );
-        let order_status = match resolved_order {
+
+        match resolved_order {
             OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
             OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
             OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
-        };
-        order_status
+        }
     }
 
     /// Process new order events that we fetch from UniswapX API
@@ -580,12 +581,12 @@ impl UniswapXPriorityFill {
         info!(
             "{} - quote_eth: {:?}",
             routed_order.request.orders[0].hash,
-            self.get_quote_eth(&routed_order)
+            self.get_quote_eth(routed_order)
         );
         Some({
             ExecutionMetadata {
                 quote,
-                quote_eth: self.get_quote_eth(&routed_order),
+                quote_eth: self.get_quote_eth(routed_order),
                 exact_output: routed_order.request.orders[0].order.is_exact_output(),
                 amount_required,
                 gas_use_estimate_quote: U256::from_str_radix(
@@ -595,7 +596,7 @@ impl UniswapXPriorityFill {
                 .ok()?,
                 order_hash: routed_order.request.orders[0].hash.clone(),
                 target_block: routed_order.target_block.map(|b| U64::from(b)),
-                fallback_bid_scale_factor: self.fallback_bid_scale_factor.clone(),
+                fallback_bid_scale_factor: self.fallback_bid_scale_factor,
             }
         })
     }
@@ -631,7 +632,7 @@ impl UniswapXPriorityFill {
                     signature: signature.to_string(),
                     resolved: resolved_order,
                     encoded_order: None,
-                    route: route,
+                    route,
                 };
                 info!("{} - Requesting fresh route for order", order_hash);
                 let order_batch = self.get_order_batch(&order_data);
@@ -715,7 +716,7 @@ impl UniswapXPriorityFill {
                 if order_data
                     .route
                     .as_ref()
-                    .map_or(true, |r| r.method_parameters.calldata.is_empty())
+                    .is_none_or(|r| r.method_parameters.calldata.is_empty())
                 {
                     debug!("{} - No route available, skipping", order_hash);
                     continue;
@@ -843,7 +844,7 @@ impl UniswapXPriorityFill {
                                 let metadata = self.get_execution_metadata(&routed_order);
                                 match metadata {
                                     Some(metadata) => {
-                                        let action = Action::SubmitPublicTx(
+                                        let action = Action::SubmitPublicTx(Box::new(
                                             SubmitTxToMempoolWithExecutionMetadata {
                                                 execution: SubmitTxToMempool {
                                                     tx: fill_tx_request.clone(),
@@ -855,7 +856,7 @@ impl UniswapXPriorityFill {
                                                 },
                                                 metadata: metadata.clone(),
                                             },
-                                        );
+                                        ));
                                         actions.push(action);
                                         info!(
                                             "{} - Successfully queued transaction for submission",
@@ -866,7 +867,7 @@ impl UniswapXPriorityFill {
                                         // Clear the route and refresh
                                         order_data.value_mut().route = None;
                                         // Refresh route and try again
-                                        let order_batch = self.get_order_batch(&order_data.value());
+                                        let order_batch = self.get_order_batch(order_data.value());
                                         self.try_route_order_batch(order_batch, order_hash.clone())
                                             .await;
                                         info!(

@@ -197,13 +197,13 @@ impl UniswapXRouteCollector {
         };
 
         let query_string = serde_qs::to_string(&query)?;
-        let full_query = format!("{}?{}", ROUTING_API, query_string);
+        let full_query = format!("{ROUTING_API}?{query_string}");
         info!("{} - full query: {}", order_hash, full_query);
         let client = reqwest::Client::new();
         let start = std::time::Instant::now();
 
         let response = client
-            .get(format!("{}?{}", ROUTING_API, query_string))
+            .get(format!("{ROUTING_API}?{query_string}"))
             .header(ORIGIN, "https://app.uniswap.org")
             .header("x-request-source", "uniswap-web")
             .header("x-universal-router-version", "2.0")

@@ -81,15 +81,13 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
             .expect("Failed to acquire key");
         info!("Acquired key: {}", addr);
 
-        let chain_id = u64::from_str_radix(
-            &action
-                .tx
-                .chain_id()
-                .expect("Chain ID not found on transaction")
-                .to_string(),
-            10,
-        )
-        .expect("Failed to parse chain ID");
+        let chain_id = action
+            .tx
+            .chain_id()
+            .expect("Chain ID not found on transaction")
+            .to_string()
+            .parse::<u64>()
+            .expect("Failed to parse chain ID");
 
         let wallet = EthereumWallet::from(
             private_key
@@ -289,7 +287,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
 
         // post key-release processing
         // TODO: parse revert reason
-        if let Some(_) = &self.cloudwatch_client {
+        if self.cloudwatch_client.is_some() {
             let metric_future = build_metric_future(
                 self.cloudwatch_client.clone(),
                 DimensionValue::V3Executor,
@@ -324,7 +322,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                 let metric_future = build_metric_future(
                     self.cloudwatch_client.clone(),
                     DimensionValue::V3Executor,
-                    CwMetrics::Balance(format!("{:?}", address)),
+                    CwMetrics::Balance(format!("{address:?}")),
                     balance_eth.parse::<f64>().unwrap_or(0.0),
                 );
                 if let Some(metric_future) = metric_future {

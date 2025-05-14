@@ -142,7 +142,7 @@ impl PriorityExecutor {
                             self.cloudwatch_client.clone(),
                             DimensionValue::PriorityExecutor,
                             CwMetrics::TargetBlockDelta(chain_id),
-                            target_block_delta as f64,
+                            target_block_delta,
                         );
                         if let Some(metric_future) = metric_future {
                             send_metric_with_order_hash!(
@@ -183,15 +183,13 @@ impl PriorityExecutor {
                                     }
                                     // Retry if the order isn't yet fillable
                                     if matches!(reason, ReactorErrorCode::OrderNotFillable) {
-                                        return Ok(TransactionOutcome::RetryableFailure);
+                                        Ok(TransactionOutcome::RetryableFailure)
                                     } else {
                                         info!(
                                             "{} - Order not fillable, returning failure",
                                             order_hash
                                         );
-                                        return Ok(TransactionOutcome::Failure(
-                                            receipt.block_number,
-                                        ));
+                                        Ok(TransactionOutcome::Failure(receipt.block_number))
                                     }
                                 }
                                 Err(e) => {
@@ -260,7 +258,7 @@ impl PriorityExecutor {
         if let Some(quote_eth) = action.metadata.quote_eth {
             if quote_eth > U256::from(0) {
                 debug!("{} - Adding fallback bids based on quote size", order_hash);
-                let quote_in_gwei = &quote_eth / GWEI_PER_ETH;
+                let quote_in_gwei = quote_eth / GWEI_PER_ETH;
                 debug!("{} - quote_eth_gwei: {:?}", order_hash, quote_in_gwei);
 
                 if quote_in_gwei > U256::from(0) {
@@ -343,16 +341,14 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
 
             info!("{} - Acquired key: {}", order_hash, addr);
 
-            let chain_id = u64::from_str_radix(
-                &action
-                    .execution
-                    .tx
-                    .chain_id()
-                    .expect("Chain ID not found on transaction")
-                    .to_string(),
-                10,
-            )
-            .expect("Failed to parse chain ID");
+            let chain_id = action
+                .execution
+                .tx
+                .chain_id()
+                .expect("Chain ID not found on transaction")
+                .to_string()
+                .parse::<u64>()
+                .expect("Failed to parse chain ID");
 
             let wallet = EthereumWallet::from(
                 private_key
@@ -385,7 +381,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                 .context("Error getting gas price: {}")?;
             let bid_priority_fees = self.get_bids_for_order(&action, &order_hash);
 
-            if bid_priority_fees.len() == 0 {
+            if bid_priority_fees.is_empty() {
                 info!(
                     "{} - No bid priority fees, indicating quote < amount_out_required; skipping",
                     order_hash
@@ -396,15 +392,13 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
 
             // Create a tx for each bid
             let mut tx_requests: Vec<WithOtherFields<TransactionRequest>> = Vec::new();
-            for bid_priority_fee in bid_priority_fees.iter() {
-                if let Some(bid) = bid_priority_fee {
-                    let mut tx_request = action.execution.tx.clone();
-                    let bid_priority_fee_128 = bid.to::<u128>();
-                    tx_request.set_gas_limit(GAS_LIMIT);
-                    tx_request.set_max_fee_per_gas(base_fee + bid_priority_fee_128);
-                    tx_request.set_max_priority_fee_per_gas(bid_priority_fee_128);
-                    tx_requests.push(tx_request);
-                }
+            for bid in bid_priority_fees.iter().flatten() {
+                let mut tx_request = action.execution.tx.clone();
+                let bid_priority_fee_128 = bid.to::<u128>();
+                tx_request.set_gas_limit(GAS_LIMIT);
+                tx_request.set_max_fee_per_gas(base_fee + bid_priority_fee_128);
+                tx_request.set_max_priority_fee_per_gas(bid_priority_fee_128);
+                tx_requests.push(tx_request);
             }
 
             // Retry up to 3 times to get the nonce.
@@ -532,7 +526,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
 
             // post key-release processing
-            if let Some(_) = &self.cloudwatch_client {
+            if self.cloudwatch_client.is_some() {
                 let metric_future = build_metric_future(
                     self.cloudwatch_client.clone(),
                     DimensionValue::PriorityExecutor,
@@ -564,7 +558,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                     let metric_future = build_metric_future(
                         self.cloudwatch_client.clone(),
                         DimensionValue::PriorityExecutor,
-                        CwMetrics::Balance(format!("{:?}", address)),
+                        CwMetrics::Balance(format!("{address:?}")),
                         balance_eth.parse::<f64>().unwrap_or(0.0),
                     );
                     if let Some(metric_future) = metric_future {
@@ -599,7 +593,7 @@ mod tests {
     use crate::strategies::priority_strategy::ExecutionMetadata;
     use crate::strategies::types::SubmitTxToMempoolWithExecutionMetadata;
     use alloy::network::AnyNetwork;
-    use alloy::primitives::{U128, U256, U64};
+    use alloy::primitives::{U256, U64};
     use alloy::providers::{DynProvider, Provider, RootProvider};
     use alloy::rpc::types::TransactionRequest;
     use artemis_light::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
@@ -622,7 +616,7 @@ mod tests {
         is_exact_output: bool,
         target_block: Option<u64>,
     ) -> SubmitTxToMempoolWithExecutionMetadata {
-        let action = SubmitTxToMempoolWithExecutionMetadata {
+        SubmitTxToMempoolWithExecutionMetadata {
             execution: SubmitTxToMempool {
                 tx: WithOtherFields::new(TransactionRequest::default()),
                 gas_bid_info: Some(GasBidInfo {
@@ -634,14 +628,13 @@ mod tests {
                 quote: quote_size,
                 quote_eth: Some(quote_size),
                 exact_output: is_exact_output,
-                amount_required: amount_required,
+                amount_required,
                 gas_use_estimate_quote: gas_estimate,
                 order_hash: "test_hash".to_string(),
                 target_block: target_block.map(|b| U64::from(b)),
                 fallback_bid_scale_factor: Some(DEFAULT_FALLBACK_BID_SCALE_FACTOR),
             },
-        };
-        action
+        }
     }
 
     #[tokio::test]

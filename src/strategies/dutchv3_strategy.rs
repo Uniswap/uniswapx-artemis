@@ -265,13 +265,13 @@ impl UniswapXDutchV3Fill {
                     for order in filtered_orders.iter() {
                         self.processing_orders.insert(order.hash.clone());
                     }
-                    return vec![Action::SubmitTx(SubmitTxToMempool {
+                    return vec![Action::SubmitTx(Box::new(SubmitTxToMempool {
                         tx: req,
                         gas_bid_info: Some(GasBidInfo {
                             bid_percentage: self.bid_percentage,
                             total_profit: profit.to(),
                         }),
-                    })];
+                    }))];
                 }
                 Err(e) => {
                     error!("Error building fill: {}", e);

@@ -56,7 +56,7 @@ impl std::fmt::Display for ReactorErrorCode {
             ReactorErrorCode::AllowanceExpired => "AllowanceExpired",
             ReactorErrorCode::Unknown => "Unknown",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -80,15 +80,15 @@ pub async fn get_revert_reason(
                 if let Some(data) = err.data.as_ref().map(|d| d.get()) {
                     let error_code = ReactorErrorCode::from(data.to_string());
                     if matches!(error_code, ReactorErrorCode::Unknown) {
-                        Err(format!("Failed to extract revert reason from code: {}", data).into())
+                        Err(format!("Failed to extract revert reason from code: {data}").into())
                     } else {
                         Ok(error_code)
                     }
                 } else {
-                    Err(format!("Failed to extract revert reason: {}", err_msg).into())
+                    Err(format!("Failed to extract revert reason: {err_msg}").into())
                 }
             } else {
-                Err(format!("Failed to extract revert reason: {}", err_msg).into())
+                Err(format!("Failed to extract revert reason: {err_msg}").into())
             }
         }
     }

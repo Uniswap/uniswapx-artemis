@@ -102,7 +102,7 @@ impl UniswapXOrderCollector {
         Self {
             client: Client::new(),
             base_url: UNISWAPX_API_URL.to_string(),
-            api_key: api_key.unwrap_or_else(|| "".to_string()),
+            api_key: api_key.unwrap_or_default(),
             chain_id,
             order_type,
             execute_address,
@@ -234,7 +234,7 @@ mod tests {
             base_url: url.clone(),
             api_key: "test-key".to_string(),
             chain_id: 1,
-            order_type: order_type,
+            order_type,
             // Inconsequential query parameter because we mock the order service response
             execute_address: "0x0000000000000000000000000000000000000000".to_string(),
         };
@@ -289,9 +289,8 @@ mod tests {
         let order_hex: Vec<u8> = hex::decode(encoded_order).unwrap();
 
         let result = V2DutchOrder::decode_inner(&order_hex, false);
-        match result {
-            Err(e) => panic!("Error decoding order: {:?}", e),
-            _ => (),
+        if let Err(e) = result {
+            panic!("Error decoding order: {e:?}")
         }
     }
 
@@ -317,9 +316,8 @@ mod tests {
         let order_hex: Vec<u8> = hex::decode(encoded_order).unwrap();
 
         let result = V3DutchOrder::decode_inner(&order_hex, false);
-        match result {
-            Err(e) => panic!("Error decoding order: {:?}", e),
-            _ => (),
+        if let Err(e) = result {
+            panic!("Error decoding order: {e:?}")
         }
     }
 }
