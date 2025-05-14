@@ -30,7 +30,7 @@ impl From<String> for ReactorErrorCode {
         } else {
             cleaned
         };
-        
+
         match code {
             "0xc6035520" => ReactorErrorCode::OrderNotFillable,
             "0xee3b3d4b" => ReactorErrorCode::OrderAlreadyFilled,
@@ -65,10 +65,9 @@ pub async fn get_revert_reason(
     tx: WithOtherFields<TransactionRequest>,
     block_number: u64,
 ) -> Result<ReactorErrorCode, Box<dyn std::error::Error>> {
-    
     // Simulate the transaction at the block right before it was mined
     let result = provider
-        .call(&tx)
+        .call(tx)
         .block(BlockId::Number(block_number.into()))
         .await;
 
@@ -76,7 +75,7 @@ pub async fn get_revert_reason(
     match result {
         Ok(_) => Err("Tx succeeded in simulation".into()),
         Err(e) => {
-            let err_msg = e.to_string();  // Clone the error message first
+            let err_msg = e.to_string(); // Clone the error message first
             if let RpcError::ErrorResp(err) = e {
                 if let Some(data) = err.data.as_ref().map(|d| d.get()) {
                     let error_code = ReactorErrorCode::from(data.to_string());

@@ -127,7 +127,9 @@ impl From<CwMetrics> for String {
             CwMetrics::Balance(val) => format!("Bal-{}", val),
             CwMetrics::LatestBlock(chain_id) => format!("{}-{}", chain_id, LATEST_BLOCK),
             CwMetrics::TargetBlockDelta(chain_id) => format!("{}-{}", chain_id, TARGET_BLOCK_DELTA),
-            CwMetrics::RevertCode(chain_id, code) => format!("{}-{}-{}", chain_id, REVERT_CODE_METRIC, code),
+            CwMetrics::RevertCode(chain_id, code) => {
+                format!("{}-{}-{}", chain_id, REVERT_CODE_METRIC, code)
+            }
         }
     }
 }

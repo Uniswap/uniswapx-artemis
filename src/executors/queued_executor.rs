@@ -2,7 +2,7 @@ use crate::executors::priority_executor::PriorityExecutor;
 use crate::strategies::keystore::KeyStore;
 use crate::strategies::types::SubmitTxToMempoolWithExecutionMetadata;
 use alloy::{network::AnyNetwork, providers::DynProvider};
-use artemis_core::types::Executor;
+use artemis_light::types::Executor;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use std::sync::Arc;

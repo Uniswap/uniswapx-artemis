@@ -1,0 +1,26 @@
+name: Install pnpm dependencies
+description: Installs all pnpm dependencies
+
+runs:
+  using: composite
+  steps:
+    - name: Setup | cache for pnpm modules
+      uses: actions/cache@v3
+      id: cache
+      with:
+        path: |
+          ~/.pnpm-store
+          node_modules
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-
+
+    - name: Setup | install pnpm
+      uses: pnpm/action-setup@v2
+      with:
+        version: 9.7.0
+
+    - name: Setup | install dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: pnpm install
+      shell: bash

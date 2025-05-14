@@ -3,22 +3,26 @@ use super::{
     types::{Config, OrderStatus, TokenInTokenOut},
 };
 use crate::{
-    aws_utils::cloudwatch_utils::{CwMetrics, DimensionName, DimensionValue, MetricBuilder, ARTEMIS_NAMESPACE}, collectors::{
+    aws_utils::cloudwatch_utils::{
+        CwMetrics, DimensionName, DimensionValue, MetricBuilder, ARTEMIS_NAMESPACE,
+    },
+    collectors::{
         block_collector::NewBlock,
         uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
-    }, shared::RouteInfo
+    },
+    shared::RouteInfo,
 };
 use alloy::{
     hex,
     network::{AnyNetwork, TransactionBuilder},
-    primitives::{Address, Bytes, Uint, U128, U256},
+    primitives::{Address, Bytes, Uint, U256},
     providers::{DynProvider, Provider},
     rpc::types::Filter,
 };
 use anyhow::Result;
-use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
-use artemis_core::types::Strategy;
+use artemis_light::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
+use artemis_light::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
@@ -52,7 +56,7 @@ pub struct UniswapXDutchV3Fill {
     /// executor address
     executor_address: String,
     /// Amount of profits to bid in gas
-    bid_percentage: u128,
+    bid_percentage: u64,
     last_block_number: u64,
     last_block_timestamp: u64,
     // map of open order hashes to order data
@@ -153,7 +157,12 @@ impl UniswapXDutchV3Fill {
                 inner: order,
                 encoded_order: event.encoded_order.clone(),
             };
-            self.update_order_state(wrapper, &event.signature, &event.order_hash, event.route.as_ref());
+            self.update_order_state(
+                wrapper,
+                &event.signature,
+                &event.order_hash,
+                event.route.as_ref(),
+            );
         }
         vec![]
     }
@@ -185,7 +194,10 @@ impl UniswapXDutchV3Fill {
         }
 
         let amount_required_u256 = U256::from_str_radix(&amount_required.to_string(), 10).ok();
-        info!("Quote: {:?}, Amount required: {:?}", event.route.quote_gas_adjusted, amount_required_u256);
+        info!(
+            "Quote: {:?}, Amount required: {:?}",
+            event.route.quote_gas_adjusted, amount_required_u256
+        );
         if let Some(profit) = self.get_profit_eth(event) {
             info!(
                 "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
@@ -214,7 +226,7 @@ impl UniswapXDutchV3Fill {
                     // Must be able to cover min gas cost
                     let sender_address = Address::from_str(&self.sender_address).unwrap();
                     req.set_from(sender_address);
-                    let gas_usage = self.client.estimate_gas(&req).await.map_or_else(
+                    let gas_usage = self.client.estimate_gas(req.clone()).await.map_or_else(
                         |err| {
                             info!("Error estimating gas: {}", err);
                             if err.to_string().contains("execution reverted") {
@@ -256,8 +268,8 @@ impl UniswapXDutchV3Fill {
                     return vec![Action::SubmitTx(SubmitTxToMempool {
                         tx: req,
                         gas_bid_info: Some(GasBidInfo {
-                            bid_percentage: U128::from(self.bid_percentage),
-                            total_profit: U128::from(profit),
+                            bid_percentage: self.bid_percentage,
+                            total_profit: profit.to(),
                         }),
                     })];
                 }
@@ -358,7 +370,7 @@ impl UniswapXDutchV3Fill {
                         .wrapping_add(amount_required);
                 }
             });
-        
+
         order_batches
     }
 
@@ -461,14 +473,17 @@ impl UniswapXDutchV3Fill {
                 }
                 if !self.open_orders.contains_key(order_hash) {
                     info!("{} - Adding new order", order_hash);
-                    
+
                     if let Some(cw) = &self.cloudwatch_client {
                         let metric_future = cw
                             .put_metric_data()
                             .namespace(ARTEMIS_NAMESPACE)
                             .metric_data(
                                 MetricBuilder::new(CwMetrics::OrderReceived(self.chain_id))
-                                    .add_dimension(DimensionName::Service.as_ref(), DimensionValue::V3Executor.as_ref())
+                                    .add_dimension(
+                                        DimensionName::Service.as_ref(),
+                                        DimensionValue::V3Executor.as_ref(),
+                                    )
                                     .with_value(1.0)
                                     .build(),
                             )

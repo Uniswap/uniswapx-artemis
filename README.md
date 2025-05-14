@@ -13,7 +13,7 @@ Then update the address constant in [uniswapx_strategy](./src/strategies/uniswap
 Finally, run the bot with the following command:
 
 ```
-cargo run -- --http <http RPC url> --mevblocker-http <mevblocker http url> --private-key <private key> --bid-percentage <percent of profit to share as gas> --order-type <Priority|DutchV2|DutchV3> --chain-id <chain id> --executor-address <executor address>
+cargo run -- --http <http RPC url> --private-key <private key> --bid-percentage <percent of profit to share as gas> --order-type <Priority|DutchV2|DutchV3> --chain-id <chain id> --executor-address <executor address>
 ```
 
 # Collectors

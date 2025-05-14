@@ -1,0 +1,38 @@
+name: Deploy CDK Stack
+description: Deploys individual CDK Stacks defined in `infrastructure/index.ts`
+
+inputs:
+  account:
+    description: The AWS account id to deploy to
+    required: true
+  region:
+    description: The AWS region to deploy to
+    required: true
+  stacks:
+    description: The stacks to deploy, separated by ' '
+    required: true
+  working-directory:
+    required: false
+    description: An optional working directory where the CDK code is located
+    default: ./
+  deploy-parameters:
+    required: false
+    description: Optional additional parameters for 'cdk-deploy'
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup | Install npm dependencies
+      uses: ./.github/actions/npm-install
+
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@master
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.account }}:role/github-actions
+        aws-region: ${{ inputs.region }}
+
+    - name: Deploy | cdk
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: npx cdk deploy --exclusively ${{ inputs.stacks }} --require-approval never ${{ inputs.deploy-parameters }}

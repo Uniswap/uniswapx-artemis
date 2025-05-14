@@ -16,3 +16,7 @@
 [submodule "lib/UniswapX"]
 	path = lib/UniswapX
 	url = git@github.com:Uniswap/UniswapX.git
+[submodule "lib/artemis-light"]
+	path = lib/artemis-light
+	url = git@github.com:lastdotnet/artemis-light.git
+	branch = legacy/v0.1.0

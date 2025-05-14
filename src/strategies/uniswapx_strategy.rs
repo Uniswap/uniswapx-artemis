@@ -18,10 +18,9 @@ use alloy::{
     providers::{DynProvider, Provider},
     rpc::types::Filter,
 };
-use alloy_primitives::U128;
 use anyhow::Result;
-use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
-use artemis_core::types::Strategy;
+use artemis_light::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
+use artemis_light::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
@@ -47,7 +46,7 @@ pub struct UniswapXUniswapFill {
     /// executor address
     executor_address: String,
     /// Amount of profits to bid in gas
-    bid_percentage: u128,
+    bid_percentage: u64,
     last_block_number: u64,
     last_block_timestamp: u64,
     // map of open order hashes to order data
@@ -134,7 +133,12 @@ impl UniswapXUniswapFill {
             .ok();
 
         if let Some(order) = order {
-            self.update_order_state(order, &event.signature, &event.order_hash, event.route.as_ref());
+            self.update_order_state(
+                order,
+                &event.signature,
+                &event.order_hash,
+                event.route.as_ref(),
+            );
         }
         vec![]
     }
@@ -181,8 +185,8 @@ impl UniswapXUniswapFill {
                     return vec![Action::SubmitTx(SubmitTxToMempool {
                         tx: fill_tx_request,
                         gas_bid_info: Some(GasBidInfo {
-                            bid_percentage: U128::from(self.bid_percentage),
-                            total_profit: U128::from(profit),
+                            bid_percentage: self.bid_percentage,
+                            total_profit: profit.to(),
                         }),
                     })];
                 }
@@ -376,7 +380,13 @@ impl UniswapXUniswapFill {
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: Option<&RouteInfo>) {
+    fn update_order_state(
+        &mut self,
+        order: V2DutchOrder,
+        signature: &str,
+        order_hash: &String,
+        route: Option<&RouteInfo>,
+    ) {
         let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
@@ -405,7 +415,7 @@ impl UniswapXUniswapFill {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: None,
-                        route: route.cloned()
+                        route: route.cloned(),
                     },
                 );
             }

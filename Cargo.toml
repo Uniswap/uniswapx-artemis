@@ -8,8 +8,7 @@ edition = "2021"
 [dependencies]
 uniswapx-rs = { path = "./crates/uniswapx-rs" }
 bindings-uniswapx = { path = "./crates/bindings-uniswapx" }
-
-artemis-core = { git = "https://github.com/ConjunctiveNormalForm/minimal-artemis-alloy", version = "0.2.0"}
+artemis-light = { path = "./lib/artemis-light" }
 tokio = { version = "1.18", features = ["full"] }
 dotenv = "0.15.0"
 async-trait = "0.1.64"
@@ -24,8 +23,7 @@ crossbeam = "0.8.2"
 crossbeam-channel = "0.5.8"
 tokio-stream = "0.1.14"
 reqwest = { version = "0.11.18", features = ["json"] }
-alloy = "0.11.1"
-alloy-primitives = "0.8.21"
+alloy = "0.13.0"
 serde_qs = "0.12.0"
 async-stream = "0.3.5"
 mockito = "1.1.0"

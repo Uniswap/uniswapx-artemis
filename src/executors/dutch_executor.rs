@@ -1,4 +1,4 @@
-use alloy_primitives::{utils::format_units, Address, U128};
+use alloy::primitives::{utils::format_units, Address, U128};
 use std::{str::FromStr, sync::Arc};
 use tracing::{info, warn};
 
@@ -10,15 +10,20 @@ use alloy::{
     signers::{local::PrivateKeySigner, Signer},
 };
 use anyhow::Result;
-use artemis_core::executors::mempool_executor::SubmitTxToMempool;
-use artemis_core::types::Executor;
+use artemis_light::executors::mempool_executor::SubmitTxToMempool;
+use artemis_light::types::Executor;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        build_metric_future, receipt_status_to_metric, revert_code_to_metric, CwMetrics, DimensionValue
-    }, executors::reactor_error_code::{get_revert_reason, ReactorErrorCode}, send_metric, shared::get_nonce_with_retry, strategies::keystore::KeyStore
+        build_metric_future, receipt_status_to_metric, revert_code_to_metric, CwMetrics,
+        DimensionValue,
+    },
+    executors::reactor_error_code::{get_revert_reason, ReactorErrorCode},
+    send_metric,
+    shared::get_nonce_with_retry,
+    strategies::keystore::KeyStore,
 };
 
 const GAS_LIMIT: u64 = 1_000_000;
@@ -86,7 +91,6 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         )
         .expect("Failed to parse chain ID");
 
-
         let wallet = EthereumWallet::from(
             private_key
                 .as_str()
@@ -97,68 +101,72 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         let address = Address::from_str(&addr).unwrap();
         action.tx.set_from(address);
 
-
         // Retry up to 3 times to get the nonce.
         let nonce = get_nonce_with_retry(&self.client, address, "", 3).await?;
         action.tx.set_nonce(nonce);
         action.tx.set_gas_limit(GAS_LIMIT);
 
-        let gas_usage_result = self.client.estimate_gas(&action.tx).await.or_else(|err| {
-            if let Some(raw) = &err.as_error_resp().unwrap().data {
-                if let Ok(serde_value) = serde_json::from_str::<serde_json::Value>(raw.get()) {
-                    if let serde_json::Value::String(four_byte) = serde_value {
-                        let error_code = ReactorErrorCode::from(four_byte.clone());
-                        match error_code {
-                            ReactorErrorCode::OrderAlreadyFilled => {
-                                info!("Order already filled, skipping execution");
-                                let metric_future = build_metric_future(
-                                    self.cloudwatch_client.clone(),
-                                    DimensionValue::V3Executor,
-                                    CwMetrics::ExecutionSkippedAlreadyFilled(chain_id),
-                                    1.0,
-                                );
-                                if let Some(metric_future) = metric_future {
-                                    send_metric!(metric_future);
+        let gas_usage_result = self
+            .client
+            .estimate_gas(action.tx.clone())
+            .await
+            .or_else(|err| {
+                if let Some(raw) = &err.as_error_resp().unwrap().data {
+                    if let Ok(serde_value) = serde_json::from_str::<serde_json::Value>(raw.get()) {
+                        if let serde_json::Value::String(four_byte) = serde_value {
+                            let error_code = ReactorErrorCode::from(four_byte.clone());
+                            match error_code {
+                                ReactorErrorCode::OrderAlreadyFilled => {
+                                    info!("Order already filled, skipping execution");
+                                    let metric_future = build_metric_future(
+                                        self.cloudwatch_client.clone(),
+                                        DimensionValue::V3Executor,
+                                        CwMetrics::ExecutionSkippedAlreadyFilled(chain_id),
+                                        1.0,
+                                    );
+                                    if let Some(metric_future) = metric_future {
+                                        send_metric!(metric_future);
+                                    }
+                                    Err(anyhow::anyhow!("Order Already Filled"))
                                 }
-                                Err(anyhow::anyhow!("Order Already Filled"))
-                            }
-                            ReactorErrorCode::InvalidDeadline => {
-                                info!("Order past deadline, skipping execution");
-                                let metric_future = build_metric_future(
-                                    self.cloudwatch_client.clone(),
-                                    DimensionValue::V3Executor,
-                                    CwMetrics::ExecutionSkippedPastDeadline(chain_id),
-                                    1.0,
-                                );
-                                if let Some(metric_future) = metric_future {
-                                    send_metric!(metric_future);
+                                ReactorErrorCode::InvalidDeadline => {
+                                    info!("Order past deadline, skipping execution");
+                                    let metric_future = build_metric_future(
+                                        self.cloudwatch_client.clone(),
+                                        DimensionValue::V3Executor,
+                                        CwMetrics::ExecutionSkippedPastDeadline(chain_id),
+                                        1.0,
+                                    );
+                                    if let Some(metric_future) = metric_future {
+                                        send_metric!(metric_future);
+                                    }
+                                    Err(anyhow::anyhow!("Order Past Deadline"))
                                 }
-                                Err(anyhow::anyhow!("Order Past Deadline"))
+                                _ => Ok(1_000_000),
                             }
-                            _ => Ok(1_000_000),
+                        } else {
+                            warn!("Unexpected error data: {:?}", serde_value);
+                            Ok(1_000_000)
                         }
                     } else {
-                        warn!("Unexpected error data: {:?}", serde_value);
+                        warn!("Error estimating gas: {:?}", err);
                         Ok(1_000_000)
                     }
                 } else {
                     warn!("Error estimating gas: {:?}", err);
                     Ok(1_000_000)
                 }
-            } else {
-                warn!("Error estimating gas: {:?}", err);
-                Ok(1_000_000)
-            }
-        });
+            });
         info!("Gas Usage {:?}", gas_usage_result);
         let gas_usage = gas_usage_result.unwrap_or(1_000_000);
 
         let bid_gas_price;
         if let Some(gas_bid_info) = action.gas_bid_info {
             // gas price at which we'd break even, meaning 100% of profit goes to validator
-            let breakeven_gas_price = gas_bid_info.total_profit / U128::from(gas_usage);
+            let breakeven_gas_price = U128::from(gas_bid_info.total_profit) / U128::from(gas_usage);
             // gas price corresponding to bid percentage
-            bid_gas_price = breakeven_gas_price * gas_bid_info.bid_percentage / U128::from(100);
+            bid_gas_price =
+                breakeven_gas_price * U128::from(gas_bid_info.bid_percentage) / U128::from(100);
         } else {
             bid_gas_price = self
                 .client
@@ -215,7 +223,13 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                         if !status && receipt.block_number.is_some() {
                             info!("Attempting to get revert reason");
                             // Parse revert reason
-                            match get_revert_reason(&self.client, tx_request_for_revert, receipt.block_number.unwrap()).await {
+                            match get_revert_reason(
+                                &self.client,
+                                tx_request_for_revert,
+                                receipt.block_number.unwrap(),
+                            )
+                            .await
+                            {
                                 Ok(reason) => {
                                     info!("Revert reason: {}", reason);
                                     let metric_future = build_metric_future(
@@ -233,8 +247,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                                     info!("Failed to get revert reason - error: {:?}", e);
                                 }
                             }
-                        }
-                        else {
+                        } else {
                             let send_metric_if_some = |metric| {
                                 if let Some(metric_future) = build_metric_future(
                                     self.cloudwatch_client.clone(),

@@ -1,0 +1,75 @@
+name: Workflow | Deploy backend
+
+on:
+  workflow_call:
+    inputs:
+      account:
+        required: true
+        type: string
+      region:
+        required: true
+        type: string
+    secrets:
+      GITHUB_TOKEN_ORG:
+        required: true
+
+jobs:
+  cluster:
+    name: cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN_ORG }}
+
+      - name: Configure Git Access
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN_ORG }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: ./.github/actions/deploy-cdk-stack
+        with:
+          account: ${{ inputs.account }}
+          region: ${{ inputs.region }}
+          stacks: imported-hypurr-liquidator-cluster
+
+  filler-backend:
+    needs:
+      - cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN_ORG }}
+
+      - name: Configure Git Access
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN_ORG }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Build Liquidator Contract
+        run: |
+          forge bind --bindings-path ./crates/liquidator-bindings \
+          --root ./crates/liquidator-contract/ --crate-name liquidator-bindings \
+          --contracts src/bindings/IFraxV3Liquidator.sol --select IFraxV3Liquidator \
+          --overwrite --skip script test --alloy-version 0.13.0
+
+      - name: Build HypurrFi Bindings
+        run: |
+          forge install
+          forge bind --bindings-path ./crates/hypurrfi-bindings \
+          --root ./lib/hypurrfi-light --crate-name hypurrfi-bindings \
+          --overwrite --alloy-version 0.13.0
+
+      - uses: ./.github/actions/deploy-cdk-stack
+        with:
+          account: ${{ inputs.account }}
+          region: ${{ inputs.region }}
+          stacks: hypurr-uniswapx-filler

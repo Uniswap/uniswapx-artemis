@@ -1,6 +1,4 @@
-use alloy_primitives::Uint;
-
-type U256 = Uint<256, 4>;
+use alloy::primitives::U256;
 
 pub trait MulDiv {
     fn mul_div_down(&self, b: U256, c: U256) -> Result<U256, anyhow::Error>;
@@ -9,11 +7,17 @@ pub trait MulDiv {
 
 impl MulDiv for U256 {
     fn mul_div_down(&self, b: U256, c: U256) -> Result<U256, anyhow::Error> {
-        let product = self.checked_mul(b).ok_or_else(|| anyhow::anyhow!("Multiplication overflow"))?;
-        product.checked_div(c).ok_or_else(|| anyhow::anyhow!("Division by zero"))
+        let product = self
+            .checked_mul(b)
+            .ok_or_else(|| anyhow::anyhow!("Multiplication overflow"))?;
+        product
+            .checked_div(c)
+            .ok_or_else(|| anyhow::anyhow!("Division by zero"))
     }
     fn mul_div_up(&self, b: U256, c: U256) -> Result<U256, anyhow::Error> {
-        let product = self.checked_mul(b).ok_or_else(|| anyhow::anyhow!("Multiplication overflow"))?;
+        let product = self
+            .checked_mul(b)
+            .ok_or_else(|| anyhow::anyhow!("Multiplication overflow"))?;
         if c == U256::ZERO {
             return Err(anyhow::anyhow!("Division by zero"));
         }
@@ -36,15 +40,18 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(5);
-        
+
         assert_eq!(a.mul_div_down(b, c).unwrap(), U256::from(40));
-        
+
         // Test with larger numbers
         let a = U256::from(1_000_000_000_000_u64);
         let b = U256::from(2_000_000_000_000_u64);
         let c = U256::from(500_000_000_000_u64);
-        
-        assert_eq!(a.mul_div_down(b, c).unwrap(), U256::from(4_000_000_000_000_u64));
+
+        assert_eq!(
+            a.mul_div_down(b, c).unwrap(),
+            U256::from(4_000_000_000_000_u64)
+        );
     }
 
     #[test]
@@ -52,15 +59,18 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(3);
-        
+
         assert_eq!(a.mul_div_up(b, c).unwrap(), U256::from(67));
-        
+
         // Test with larger numbers
         let a = U256::from(1_000_000_000_000_u64);
         let b = U256::from(2_000_000_000_000_u64);
         let c = U256::from(300_000_000_000_u64);
-        
-        assert_eq!(a.mul_div_up(b, c).unwrap(), U256::from(6_666_666_666_667_u64));
+
+        assert_eq!(
+            a.mul_div_up(b, c).unwrap(),
+            U256::from(6_666_666_666_667_u64)
+        );
     }
 
     #[test]
@@ -68,7 +78,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(2);
-        
+
         assert_eq!(a.mul_div_down(b, c).unwrap(), U256::from(100));
     }
 
@@ -77,7 +87,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(3);
-        
+
         assert_eq!(a.mul_div_down(b, c).unwrap(), U256::from(66));
     }
 
@@ -86,7 +96,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(2);
-        
+
         assert_eq!(a.mul_div_up(b, c).unwrap(), U256::from(100));
     }
 
@@ -95,7 +105,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(3);
-        
+
         assert_eq!(a.mul_div_up(b, c).unwrap(), U256::from(67));
     }
 
@@ -104,7 +114,7 @@ mod tests {
         let a = U256::MAX;
         let b = U256::from(2);
         let c = U256::from(1);
-        
+
         let result = a.mul_div_down(b, c);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Multiplication overflow");
@@ -115,7 +125,7 @@ mod tests {
         let a = U256::MAX;
         let b = U256::from(2);
         let c = U256::from(1);
-        
+
         let result = a.mul_div_up(b, c);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Multiplication overflow");
@@ -126,7 +136,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(0);
-        
+
         let result = a.mul_div_down(b, c);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Division by zero");
@@ -137,7 +147,7 @@ mod tests {
         let a = U256::from(10);
         let b = U256::from(20);
         let c = U256::from(0);
-        
+
         let result = a.mul_div_up(b, c);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Division by zero");

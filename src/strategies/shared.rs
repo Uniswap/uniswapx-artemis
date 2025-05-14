@@ -2,13 +2,12 @@ use crate::collectors::uniswapx_route_collector::RoutedOrder;
 use alloy::{
     hex,
     network::{AnyNetwork, TransactionBuilder},
-    primitives::{Address, U256},
+    primitives::{Address, Bytes, U256},
     providers::{DynProvider, Provider},
     rpc::types::TransactionRequest,
     serde::WithOtherFields,
     sol,
 };
-use alloy_primitives::Bytes;
 use anyhow::Result;
 use async_trait::async_trait;
 use bindings_uniswapx::{
@@ -78,6 +77,7 @@ pub trait UniswapXStrategy {
             })
             .collect();
         let call = fill_contract.executeBatch(orders, Bytes::from(encoded_calldata));
+
         Ok(call.into_transaction_request().with_chain_id(chain_id))
     }
 
@@ -116,13 +116,15 @@ pub trait UniswapXStrategy {
         let quote = U256::from_str_radix(&route.quote, 10).ok()?;
         let amount_required =
             U256::from_str_radix(&request.amount_required.to_string(), 10).ok()?;
-        
+
         // exact_out: quote must be less than amount_in_required
         // exact_in: quote must be greater than amount_out_required
-        if (request.orders.first().unwrap().order.is_exact_output() && quote.ge(&amount_required)) ||
-            (!request.orders.first().unwrap().order.is_exact_output() && quote.le(&amount_required)) {
-             return None;
-         }
+        if (request.orders.first().unwrap().order.is_exact_output() && quote.ge(&amount_required))
+            || (!request.orders.first().unwrap().order.is_exact_output()
+                && quote.le(&amount_required))
+        {
+            return None;
+        }
 
         // exact_out: profit = amount_in_required - quote
         // exact_in: profit = quote - amount_out_required
@@ -145,15 +147,15 @@ pub trait UniswapXStrategy {
     }
 
     /// Converts the quote amount to ETH equivalent value
-    /// 
+    ///
     /// For WETH output tokens, returns the quote directly since it's already in ETH.
     /// For non-WETH output tokens, converts using the following formula:
     /// quote_eth = quote * gas_wei / gas_in_quote
-    /// 
+    ///
     /// # Arguments
     /// * `request` - The order request containing token information
     /// * `route` - The route containing quote and gas estimates
-    /// 
+    ///
     /// # Returns
     /// * `Some(U256)` - The quote value in ETH
     /// * `None` - If any conversion fails or division by zero would occur

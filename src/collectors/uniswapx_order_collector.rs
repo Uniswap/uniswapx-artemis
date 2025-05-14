@@ -1,5 +1,6 @@
+use crate::shared::RouteInfo;
 use anyhow::Result;
-use artemis_core::types::{Collector, CollectorStream};
+use artemis_light::types::{Collector, CollectorStream};
 use async_trait::async_trait;
 use futures::{stream, StreamExt};
 use reqwest::Client;
@@ -9,7 +10,6 @@ use std::str::FromStr;
 use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
-use crate::shared::RouteInfo;
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_MS: u64 = 250;
@@ -93,7 +93,12 @@ pub struct UniswapXOrderCollector {
 }
 
 impl UniswapXOrderCollector {
-    pub fn new(chain_id: u64, order_type: OrderType, execute_address: String, api_key: Option<String>) -> Self {
+    pub fn new(
+        chain_id: u64,
+        order_type: OrderType,
+        execute_address: String,
+        api_key: Option<String>,
+    ) -> Self {
         Self {
             client: Client::new(),
             base_url: UNISWAPX_API_URL.to_string(),
@@ -132,30 +137,30 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             let api_key = self.api_key.clone();
             async move {
                 tracing::debug!("Polling UniswapX API for new orders");
-                
+
                 #[allow(unused_assignments)]
                 let mut last_error = None;
                 loop {
-                    match client.get(url.clone())
+                    match client
+                        .get(url.clone())
                         .header("x-api-key", api_key.clone())
                         .send()
-                        .await {
-                        Ok(resp) => {
-                            match resp.json::<UniswapXOrderResponse>().await {
-                                Ok(data) => {
-                                    tracing::debug!(
-                                        num_orders = data.orders.len(),
-                                        "Successfully fetched orders from UniswapX API"
-                                    );
-                                    return Ok(data.orders);
-                                },
-                                Err(e) => {
-                                    last_error = Some(e.to_string());
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Failed to parse UniswapX API response, retrying..."
-                                    );
-                                }
+                        .await
+                    {
+                        Ok(resp) => match resp.json::<UniswapXOrderResponse>().await {
+                            Ok(data) => {
+                                tracing::debug!(
+                                    num_orders = data.orders.len(),
+                                    "Successfully fetched orders from UniswapX API"
+                                );
+                                return Ok(data.orders);
+                            }
+                            Err(e) => {
+                                last_error = Some(e.to_string());
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to parse UniswapX API response, retrying..."
+                                );
                             }
                         },
                         Err(e) => {
@@ -166,7 +171,7 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                             );
                         }
                     }
-                    
+
                     if let Some(err) = last_error {
                         tracing::warn!(error = %err, "Error in order stream, retrying...");
                         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -180,7 +185,7 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 Err(e) => {
                     tracing::warn!(error = %e, "Error in order stream, skipping batch");
                     stream::once(async { Err(e) }).right_stream()
-                },
+                }
             },
         )
         .filter_map(|result| async {
@@ -201,12 +206,10 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
 mod tests {
     use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
     use alloy::hex;
-    use artemis_core::types::Collector;
+    use artemis_light::types::Collector;
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
-    use uniswapx_rs::order::{
-        V2DutchOrder, V3DutchOrder,
-    };
+    use uniswapx_rs::order::{V2DutchOrder, V3DutchOrder};
 
     use super::OrderType;
 

@@ -2,7 +2,7 @@ use crate::collectors::{
     block_collector::NewBlock, uniswapx_order_collector::UniswapXOrder,
     uniswapx_route_collector::RoutedOrder,
 };
-use artemis_core::executors::mempool_executor::SubmitTxToMempool;
+use artemis_light::executors::mempool_executor::SubmitTxToMempool;
 use uniswapx_rs::order::ResolvedOrder;
 
 use super::priority_strategy::ExecutionMetadata;
@@ -31,7 +31,7 @@ pub enum Action {
 /// Configuration for variables we need to pass to the strategy.
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub bid_percentage: Option<u128>,
+    pub bid_percentage: Option<u64>,
     pub executor_address: String,
     pub min_block_percentage_buffer: Option<u64>,
     pub fallback_bid_scale_factor: Option<u64>,

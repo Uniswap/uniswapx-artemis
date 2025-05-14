@@ -1,10 +1,6 @@
 use std::error::Error;
 
-use alloy_dyn_abi::SolType;
-use alloy_primitives::Uint;
-use alloy_primitives::I256;
-use alloy_primitives::U256;
-use alloy_sol_types::sol;
+use alloy::{dyn_abi::SolType, primitives::{Uint, I256, U256}, sol};
 use anyhow::Result;
 use serde::Serialize;
 
