@@ -11,7 +11,8 @@ use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
-static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
+// static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
+static UNISWAPX_API_URL: &str = "https://j6nfzv9j4e.execute-api.us-east-1.amazonaws.com/prod/limit";
 static POLL_INTERVAL_MS: u64 = 250;
 
 #[derive(Debug)]
@@ -44,7 +45,7 @@ impl FromStr for OrderType {
             "Dutch_V2" => Ok(OrderType::DutchV2),
             "Dutch_V3" => Ok(OrderType::DutchV3),
             "Priority" => Ok(OrderType::Priority),
-            "LimitOrder" => Ok(OrderType::LimitOrder),
+            "Limit" => Ok(OrderType::LimitOrder),
             _ => Err(OrderTypeError::InvalidOrderType),
         }
     }
@@ -56,7 +57,7 @@ impl fmt::Display for OrderType {
             OrderType::DutchV2 => write!(f, "Dutch_V2"),
             OrderType::DutchV3 => write!(f, "Dutch_V3"),
             OrderType::Priority => write!(f, "Priority"),
-            OrderType::LimitOrder => write!(f, "LimitOrder"),
+            OrderType::LimitOrder => write!(f, "Limit"),
         }
     }
 }
@@ -123,6 +124,8 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             "{}/orders?orderStatus=open&chainId={}&orderType={}&limit=500&executeAddress={}",
             self.base_url, self.chain_id, self.order_type, self.execute_address,
         );
+
+        println!("url: {}", url);
 
         tracing::info!(
             chain_id = self.chain_id,

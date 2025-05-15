@@ -64,24 +64,14 @@ sol! {
     }
 
     #[derive(Debug)]
-    struct LimitOrderOutput {
-        address token;
-        uint256 amount;
-        address recipient;
-    }
-
-    #[derive(Debug)]
-    struct LimitOrderInput {
-        address token;
-        uint256 amount;
-    }
-
-    #[derive(Debug)]
     struct LimitOrder {
         OrderInfo info;
-        address cosigner;
-        LimitOrderInput baseInput;
-        LimitOrderOutput[] baseOutputs;
+        uint256 decayStartTime;
+        uint256 decayEndTime;
+        address exclusiveFiller;
+        uint256 exclusivityOverrideBps;
+        DutchInput input;
+        DutchOutput[] outputs;
     }
 
     #[derive(Debug)]
@@ -802,17 +792,17 @@ impl LimitOrder {
         };
 
         let input = ResolvedInput {
-            token: self.baseInput.token.to_string(),
-            amount: self.baseInput.amount,
+            token: self.input.token.to_string(),
+            amount: self.input.startAmount,
         };
 
         let outputs: Result<Vec<ResolvedOutput>> = self
-            .baseOutputs
+            .outputs
             .iter()
             .map(|output| {
                 Ok(ResolvedOutput {
                     token: output.token.to_string(),
-                    amount: output.amount,
+                    amount: output.startAmount,
                     recipient: output.recipient.to_string(),
                 })
             })
