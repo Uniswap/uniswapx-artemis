@@ -346,22 +346,41 @@ impl UniswapXUniswapFill {
     }
 
     fn update_open_orders(&mut self) {
-        // TODO: this is nasty, plz cleanup
-        let binding = self.open_orders.clone();
-        let order_hashes: Vec<(&String, &OrderData)> = binding.iter().collect();
-        for (order_hash, order_data) in order_hashes {
-            match &order_data.order {
-                Order::V2DutchOrder(order) => {
-                    self.update_order_state(
-                        order.clone(),
-                        &order_data.signature,
-                        &order_hash.to_string(),
-                        order_data.route.as_ref(),
-                    );
+        // First collect all the order hashes to avoid borrowing conflicts
+        let order_hashes: Vec<String> = self.open_orders.keys().cloned().collect();
+        
+        // Process each order individually
+        for hash in order_hashes {
+            // Use a scope to limit borrow of self.open_orders
+            let order_details = {
+                if let Some(data) = self.open_orders.get(&hash) {
+                    // Only proceed with V2DutchOrder types
+                    match &data.order {
+                        Order::V2DutchOrder(order) => {
+                            Some((
+                                order.clone(),
+                                data.signature.clone(),
+                                data.route.clone()
+                            ))
+                        },
+                        _ => {
+                            error!("Invalid order type for hash: {}", hash);
+                            None
+                        }
+                    }
+                } else {
+                    None
                 }
-                _ => {
-                    error!("Invalid order type");
-                }
+            };
+            
+            // Now process with the extracted data outside the borrow
+            if let Some((order, signature, route)) = order_details {
+                self.update_order_state(
+                    order,
+                    &signature,
+                    &hash,
+                    route.as_ref()
+                );
             }
         }
     }
