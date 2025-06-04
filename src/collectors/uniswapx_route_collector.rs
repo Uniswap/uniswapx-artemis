@@ -21,7 +21,7 @@ use crate::{
     shared::{send_metric_with_order_hash, RouteInfo, MethodParameters},
 };
 
-const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
+const ROUTING_API: &str = "https://router-dev.mimboku.com/quote";
 const SLIPPAGE_TOLERANCE: &str = "2.5";
 const DEADLINE: u64 = 1000;
 
@@ -68,48 +68,70 @@ struct RoutingApiQuery {
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct TokenInRoute {
-    address: String,
-    chain_id: u64,
-    symbol: String,
-    decimals: String,
+    pub address: String,
+    pub chain_id: u64,
+    pub symbol: String,
+    pub decimals: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct V4Route {
-    address: String,
-    token_in: TokenInRoute,
-    token_out: TokenInRoute,
-    fee: String,
+    pub address: String,
+    pub router_address: String,
+    pub token_in: TokenInRoute,
+    pub token_out: TokenInRoute,
+    pub fee: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct V3Route {
-    address: String,
-    token_in: TokenInRoute,
-    token_out: TokenInRoute,
-    fee: String,
+    pub address: String,
+    pub router_address: String,
+    pub token_in: TokenInRoute,
+    pub token_out: TokenInRoute,
+    pub fee: String,
+    pub amount_in: Option<String>,
+    pub amount_out: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct V3S1Route {
+    pub address: String,
+    pub router_address: String,
+    pub token_in: TokenInRoute,
+    pub token_out: TokenInRoute,
+    pub fee: String,
+    pub amount_in: Option<String>,
+    pub amount_out: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct V2Route {
-    address: String,
-    token_in: TokenInRoute,
-    token_out: TokenInRoute,
+    pub address: String,
+    pub router_address: String,
+    pub token_in: TokenInRoute,
+    pub token_out: TokenInRoute,
+    pub amount_in: Option<String>,
+    pub amount_out: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum Route {
-    #[serde(rename = "v4-pool")]
-    V4(V4Route),
+    // #[serde(rename = "v4-pool")]
+    // V4(V4Route),
     #[serde(rename = "v3-pool")]
     V3(V3Route),
+    #[serde(rename = "v3s1-pool")]
+    V3S1(V3S1Route),
     #[serde(rename = "v2-pool")]
     V2(V2Route),
 }
@@ -193,7 +215,7 @@ impl UniswapXRouteCollector {
             slippage_tolerance: SLIPPAGE_TOLERANCE.to_string(),
             enable_universal_router: true,
             deadline: DEADLINE,
-            protocols: "v2,v3,v4,mixed".to_string(),
+            protocols: "v2,v3,v3s1,mixed".to_string(),
         };
 
         let query_string = serde_qs::to_string(&query)?;
@@ -204,8 +226,8 @@ impl UniswapXRouteCollector {
 
         let response = client
             .get(format!("{}?{}", ROUTING_API, query_string))
-            .header(ORIGIN, "https://app.uniswap.org")
-            .header("x-request-source", "uniswap-web")
+            .header(ORIGIN, "https://ag.mimboku.com")
+            .header("x-request-source", "mimboku-web")
             .header("x-universal-router-version", "2.0")
             .send()
             .await
@@ -228,7 +250,7 @@ impl UniswapXRouteCollector {
                     .json::<OrderRoute>()
                     .await
                     .map_err(|e| anyhow!("{} - Failed to parse response: {}", order_hash, e))?;
-                info!("{} - Received route: {:?}", order_hash, order_route);
+                info!("{} - Received route: {:?} - {:?}", order_hash, order_route, order_route.route);
                 Ok(order_route)
             }
             StatusCode::BAD_REQUEST => Err(anyhow!(
@@ -331,6 +353,7 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
                         Ok(route) => {
                             let target_block = match &batch.orders[0].order {
                                 Order::PriorityOrder(order) => Some(order.cosignerData.auctionTargetBlock),
+                                Order::LimitOrder(order) => Some(order.decayEndTime),
                                 _ => None,
                             };
                             yield RoutedOrder {

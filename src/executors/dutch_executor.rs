@@ -167,7 +167,8 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                 .map_or_else(|_| U128::from(1), |v| U128::from(v));
         }
         info!("bid_gas_price: {}", bid_gas_price);
-        action.tx.set_gas_price(bid_gas_price.to());
+        // action.tx.set_gas_price(bid_gas_price.to());
+        action.tx.set_gas_price(U128::from(1000007).to());
 
         info!("Executing tx {:?}", action.tx);
         let chain_id = action

@@ -37,7 +37,7 @@ use super::types::{Action, Event};
 
 const BLOCK_TIME: u64 = 12;
 const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+const REACTOR_ADDRESS: &str = "0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87";
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -161,6 +161,7 @@ impl LimitOrderFill {
         } = &event.request;
 
         if let Some(profit) = self.get_profit_eth(event) {
+            info!("profit: {}", profit);
             info!(
                 "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
                 orders.len(),
