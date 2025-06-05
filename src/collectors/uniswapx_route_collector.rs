@@ -16,12 +16,12 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 
+use crate::shared::get_routing_api;
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
-    shared::{send_metric_with_order_hash, RouteInfo, MethodParameters},
+    shared::{send_metric_with_order_hash, MethodParameters, RouteInfo},
 };
 
-const ROUTING_API: &str = "https://router-dev.mimboku.com/quote";
 const SLIPPAGE_TOLERANCE: &str = "2.5";
 const DEADLINE: u64 = 1000;
 
@@ -219,13 +219,13 @@ impl UniswapXRouteCollector {
         };
 
         let query_string = serde_qs::to_string(&query)?;
-        let full_query = format!("{}?{}", ROUTING_API, query_string);
+        let full_query = format!("{}?{}", get_routing_api(), query_string);
         info!("{} - full query: {}", order_hash, full_query);
         let client = reqwest::Client::new();
         let start = std::time::Instant::now();
 
         let response = client
-            .get(format!("{}?{}", ROUTING_API, query_string))
+            .get(format!("{}?{}", get_routing_api(), query_string))
             .header(ORIGIN, "https://ag.mimboku.com")
             .header("x-request-source", "mimboku-web")
             .header("x-universal-router-version", "2.0")
@@ -250,7 +250,10 @@ impl UniswapXRouteCollector {
                     .json::<OrderRoute>()
                     .await
                     .map_err(|e| anyhow!("{} - Failed to parse response: {}", order_hash, e))?;
-                info!("{} - Received route: {:?} - {:?}", order_hash, order_route, order_route.route);
+                info!(
+                    "{} - Received route: {:?} - {:?}",
+                    order_hash, order_route, order_route.route
+                );
                 Ok(order_route)
             }
             StatusCode::BAD_REQUEST => Err(anyhow!(

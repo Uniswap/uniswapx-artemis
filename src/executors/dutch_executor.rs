@@ -17,8 +17,13 @@ use aws_sdk_cloudwatch::Client as CloudWatchClient;
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        build_metric_future, receipt_status_to_metric, revert_code_to_metric, CwMetrics, DimensionValue
-    }, executors::reactor_error_code::{get_revert_reason, ReactorErrorCode}, send_metric, shared::get_nonce_with_retry, strategies::keystore::KeyStore
+        build_metric_future, receipt_status_to_metric, revert_code_to_metric, CwMetrics,
+        DimensionValue,
+    },
+    executors::reactor_error_code::{get_revert_reason, ReactorErrorCode},
+    send_metric,
+    shared::get_nonce_with_retry,
+    strategies::keystore::KeyStore,
 };
 
 const GAS_LIMIT: u64 = 1_000_000;
@@ -86,7 +91,6 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         )
         .expect("Failed to parse chain ID");
 
-
         let wallet = EthereumWallet::from(
             private_key
                 .as_str()
@@ -96,7 +100,6 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         );
         let address = Address::from_str(&addr).unwrap();
         action.tx.set_from(address);
-
 
         // Retry up to 3 times to get the nonce.
         let nonce = get_nonce_with_retry(&self.client, address, "", 3).await?;
@@ -170,7 +173,6 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         // action.tx.set_gas_price(bid_gas_price.to());
         action.tx.set_gas_price(U128::from(1000007).to());
 
-        info!("Executing tx {:?}", action.tx);
         let chain_id = action
             .tx
             .chain_id()
@@ -216,7 +218,13 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                         if !status && receipt.block_number.is_some() {
                             info!("Attempting to get revert reason");
                             // Parse revert reason
-                            match get_revert_reason(&self.client, tx_request_for_revert, receipt.block_number.unwrap()).await {
+                            match get_revert_reason(
+                                &self.client,
+                                tx_request_for_revert,
+                                receipt.block_number.unwrap(),
+                            )
+                            .await
+                            {
                                 Ok(reason) => {
                                     info!("Revert reason: {}", reason);
                                     let metric_future = build_metric_future(
@@ -234,8 +242,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                                     info!("Failed to get revert reason - error: {:?}", e);
                                 }
                             }
-                        }
-                        else {
+                        } else {
                             let send_metric_if_some = |metric| {
                                 if let Some(metric_future) = build_metric_future(
                                     self.cloudwatch_client.clone(),

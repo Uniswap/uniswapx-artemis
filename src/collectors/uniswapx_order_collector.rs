@@ -1,3 +1,4 @@
+use crate::shared::get_uniswapx_api_url;
 use crate::shared::RouteInfo;
 use anyhow::Result;
 use artemis_core::types::{Collector, CollectorStream};
@@ -11,7 +12,6 @@ use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
-static UNISWAPX_API_URL: &str = "https://j6nfzv9j4e.execute-api.us-east-1.amazonaws.com/prod/limit";
 static POLL_INTERVAL_MS: u64 = 5000; // 5 seconds
 
 #[derive(Debug)]
@@ -104,7 +104,7 @@ impl UniswapXOrderCollector {
     ) -> Self {
         Self {
             client: Client::new(),
-            base_url: UNISWAPX_API_URL.to_string(),
+            base_url: get_uniswapx_api_url(),
             api_key: api_key.unwrap_or_else(|| "".to_string()),
             chain_id,
             order_type,

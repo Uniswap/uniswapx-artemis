@@ -2,6 +2,7 @@ use super::{
     shared::UniswapXStrategy,
     types::{Config, OrderStatus, TokenInTokenOut},
 };
+use crate::shared::get_reactor_address;
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
     collectors::{
@@ -28,7 +29,7 @@ use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{collections::HashMap, fmt::Debug, collections::HashSet};
+use std::{collections::HashMap, collections::HashSet, fmt::Debug};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{LimitOrder, Order, OrderResolution};
@@ -37,7 +38,6 @@ use super::types::{Action, Event};
 
 const BLOCK_TIME: u64 = 3;
 const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87";
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -156,7 +156,7 @@ impl LimitOrderFill {
         {
             return vec![];
         }
-        
+
         let OrderBatchData {
             orders,
             amount_required: amount_out_required,
@@ -182,10 +182,12 @@ impl LimitOrderFill {
                 amount_out_required,
                 profit
             );
-            let signed_orders = self.get_signed_orders(filtered_orders.clone()).unwrap_or_else(|e| {
-                error!("Error getting signed orders: {}", e);
-                vec![]
-            });
+            let signed_orders = self
+                .get_signed_orders(filtered_orders.clone())
+                .unwrap_or_else(|e| {
+                    error!("Error getting signed orders: {}", e);
+                    vec![]
+                });
 
             let fill_tx_request = self
                 .build_fill(
@@ -337,9 +339,16 @@ impl LimitOrderFill {
     }
 
     async fn handle_fills(&mut self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = get_reactor_address("limit").parse::<Address>().unwrap();
+        // Look at last 10 blocks to catch any recent fills
+        let from_block = if self.last_block_number > 10 { 
+            self.last_block_number - 10 
+        } else { 
+            0 
+        };
         let filter = Filter::new()
-            .select(self.last_block_number)
+            .from_block(from_block)
+            .to_block(self.last_block_number)
             .address(reactor_address)
             .event("Fill(bytes32,address,address,uint256)");
 

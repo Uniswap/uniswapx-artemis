@@ -2,6 +2,7 @@ use super::{
     shared::UniswapXStrategy,
     types::{Config, OrderStatus, TokenInTokenOut},
 };
+use crate::shared::get_reactor_address;
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
     collectors::{
@@ -28,7 +29,7 @@ use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{collections::HashMap, fmt::Debug, collections::HashSet};
+use std::{collections::HashMap, collections::HashSet, fmt::Debug};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, V2DutchOrder};
@@ -37,7 +38,6 @@ use super::types::{Action, Event};
 
 const BLOCK_TIME: u64 = 12;
 const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -137,7 +137,12 @@ impl UniswapXUniswapFill {
             .ok();
 
         if let Some(order) = order {
-            self.update_order_state(order, &event.signature, &event.order_hash, event.route.as_ref());
+            self.update_order_state(
+                order,
+                &event.signature,
+                &event.order_hash,
+                event.route.as_ref(),
+            );
         }
         vec![]
     }
@@ -151,7 +156,7 @@ impl UniswapXUniswapFill {
         {
             return vec![];
         }
-        
+
         let OrderBatchData {
             orders,
             amount_required: amount_out_required,
@@ -176,10 +181,12 @@ impl UniswapXUniswapFill {
                 amount_out_required,
                 profit
             );
-            let signed_orders = self.get_signed_orders(filtered_orders.clone()).unwrap_or_else(|e| {
-                error!("Error getting signed orders: {}", e);
-                vec![]
-            });
+            let signed_orders = self
+                .get_signed_orders(filtered_orders.clone())
+                .unwrap_or_else(|e| {
+                    error!("Error getting signed orders: {}", e);
+                    vec![]
+                });
 
             let fill_tx_request = self
                 .build_fill(
@@ -288,50 +295,50 @@ impl UniswapXUniswapFill {
             .iter()
             .filter(|(_, order_data)| !self.processing_orders.contains(&order_data.hash))
             .for_each(|(_, order_data)| {
-            let token_in_token_out = TokenInTokenOut {
-                token_in: order_data.resolved.input.token.clone(),
-                token_out: order_data.resolved.outputs[0].token.clone(),
-            };
-
-            let amount_in = order_data.resolved.input.amount;
-            let amount_out = order_data
-                .resolved
-                .outputs
-                .iter()
-                .fold(Uint::from(0), |sum, output| sum.wrapping_add(output.amount));
-
-            let amount_required = if order_data.order.is_exact_output() {
-                amount_in
-            } else {
-                amount_out
-            };
-            // insert new order and update total amount out
-            if let std::collections::hash_map::Entry::Vacant(e) =
-                order_batches.entry(token_in_token_out.clone())
-            {
-                e.insert(OrderBatchData {
-                    orders: vec![order_data.clone()],
-                    amount_in,
-                    amount_out,
-                    amount_required,
+                let token_in_token_out = TokenInTokenOut {
                     token_in: order_data.resolved.input.token.clone(),
                     token_out: order_data.resolved.outputs[0].token.clone(),
-                    chain_id: self.chain_id,
-                });
-            } else {
-                let order_batch_data = order_batches.get_mut(&token_in_token_out).unwrap();
-                order_batch_data.orders.push(order_data.clone());
-                order_batch_data.amount_in = order_batch_data.amount_in.wrapping_add(amount_in);
-                order_batch_data.amount_required = order_batch_data
-                    .amount_required
-                    .wrapping_add(amount_required);
-            }
-        });
+                };
+
+                let amount_in = order_data.resolved.input.amount;
+                let amount_out = order_data
+                    .resolved
+                    .outputs
+                    .iter()
+                    .fold(Uint::from(0), |sum, output| sum.wrapping_add(output.amount));
+
+                let amount_required = if order_data.order.is_exact_output() {
+                    amount_in
+                } else {
+                    amount_out
+                };
+                // insert new order and update total amount out
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    order_batches.entry(token_in_token_out.clone())
+                {
+                    e.insert(OrderBatchData {
+                        orders: vec![order_data.clone()],
+                        amount_in,
+                        amount_out,
+                        amount_required,
+                        token_in: order_data.resolved.input.token.clone(),
+                        token_out: order_data.resolved.outputs[0].token.clone(),
+                        chain_id: self.chain_id,
+                    });
+                } else {
+                    let order_batch_data = order_batches.get_mut(&token_in_token_out).unwrap();
+                    order_batch_data.orders.push(order_data.clone());
+                    order_batch_data.amount_in = order_batch_data.amount_in.wrapping_add(amount_in);
+                    order_batch_data.amount_required = order_batch_data
+                        .amount_required
+                        .wrapping_add(amount_required);
+                }
+            });
         order_batches
     }
 
     async fn handle_fills(&mut self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = get_reactor_address("uniswap").parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(self.last_block_number)
             .address(reactor_address)
@@ -401,7 +408,13 @@ impl UniswapXUniswapFill {
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: Option<&RouteInfo>) {
+    fn update_order_state(
+        &mut self,
+        order: V2DutchOrder,
+        signature: &str,
+        order_hash: &String,
+        route: Option<&RouteInfo>,
+    ) {
         let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
         let order_status: OrderStatus = match resolved {
             OrderResolution::Expired => OrderStatus::Done,
@@ -430,7 +443,7 @@ impl UniswapXUniswapFill {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: None,
-                        route: route.cloned()
+                        route: route.cloned(),
                     },
                 );
             }

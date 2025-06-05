@@ -1,6 +1,6 @@
 use crate::collectors::uniswapx_route_collector::{Route, RoutedOrder};
+use crate::shared::get_reactor_address;
 use alloy::{
-    hex,
     network::{AnyNetwork, TransactionBuilder},
     primitives::{Address, U256},
     providers::{DynProvider, Provider},
@@ -26,7 +26,6 @@ use tracing::info;
 
 use ethers::abi::Token;
 
-const REACTOR_ADDRESS: &str = "0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87";
 const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 pub const WETH_ADDRESS: &str = "0x1514000000000000000000000000000000000000";
 const ARBITRUM_GAS_PRECOMPILE: &str = "0x000000000000000000000000000000000000006C";
@@ -73,10 +72,8 @@ pub trait UniswapXStrategy {
         executor_address: &str,
         signed_orders: Vec<SignedOrder>,
         route_order: &RoutedOrder,
-        // RoutedOrder { request, route, .. }: &RoutedOrder,
     ) -> Result<WithOtherFields<TransactionRequest>> {
         let request = route_order.request.clone();
-        let route = route_order.route.clone();
         let chain_id = client.get_chain_id().await?;
         let fill_contract =
             SwapRouter02Executor::new(Address::from_str(executor_address)?, client.clone());
@@ -90,22 +87,18 @@ pub trait UniswapXStrategy {
             .get_tokens_to_approve(client.clone(), token_in, executor_address, PERMIT2_ADDRESS)
             .await?;
 
-        info!("permit2_approval: {:?}", permit2_approval);
-
         let reactor_approval = self
-            .get_tokens_to_approve(client.clone(), token_out, executor_address, REACTOR_ADDRESS)
+            .get_tokens_to_approve(
+                client.clone(),
+                token_out,
+                executor_address,
+                &get_reactor_address("default"),
+            )
             .await?;
-
-        info!("reactor_approval: {:?}", reactor_approval);
-
-        info!("route: {:?}", route.route);
 
         let encoded_execute_bytes = self
             .encode_multiroute_calldata(route_order, executor_address)
             .await;
-
-        let hex_encoded_execute_bytes = hex::encode(encoded_execute_bytes.clone());
-        info!("hex_encoded_execute_bytes: {:?}", hex_encoded_execute_bytes);
 
         // abi encode as [tokens to approve to swap router 02, tokens to approve to reactor,  multicall data]
         //               [address[], address[], bytes[]]
@@ -113,14 +106,7 @@ pub trait UniswapXStrategy {
             Token::Array(permit2_approval),
             Token::Array(reactor_approval),
             Token::Bytes(encoded_execute_bytes),
-            // Token::Array(vec![Token::Bytes(encoded_execute_bytes)]),
-            // Token::Bytes(encoded_execute_bytes),
         ]);
-
-        info!(
-            "encoded_calldata: {:?}",
-            hex::encode(encoded_calldata.clone())
-        );
 
         let orders: Vec<SwapRouter02Executor::SignedOrder> = signed_orders
             .into_iter()

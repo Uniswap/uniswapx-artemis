@@ -45,7 +45,7 @@ pub mod strategies;
 #[command(group(
     ArgGroup::new("key_source")
         .args(&["private_key", "private_key_file", "aws_secret_arn"])
-        .required(true)
+        .required(false)
 ))]
 #[command(group(
     ArgGroup::new("aws_features")
@@ -53,59 +53,59 @@ pub mod strategies;
 ))]
 pub struct Args {
     /// Ethereum node WSS endpoint.
-    #[arg(long, required = false)]
+    #[arg(long, required = false, env = "WSS_ENDPOINT")]
     pub wss: Option<String>,
 
     /// Ethereum node HTTP endpoint.
-    #[arg(long, required = false)]
+    #[arg(long, required = false, env = "HTTP_ENDPOINT")]
     pub http: Option<String>,
 
     /// Private key for sending txs.
-    #[arg(long, group = "key_source")]
+    #[arg(long, group = "key_source", env = "PRIVATE_KEY")]
     pub private_key: Option<String>,
 
     /// Path to file containing mapping between public address and private key.
-    #[arg(long, group = "key_source")]
+    #[arg(long, group = "key_source", env = "PRIVATE_KEY_FILE")]
     pub private_key_file: Option<String>,
 
     /// AWS secret arn for fetching private key.
     /// This is a secret manager arn that contains the private key as plain text.
-    #[arg(long, group = "key_source")]
+    #[arg(long, group = "key_source", env = "AWS_SECRET_ARN")]
     pub aws_secret_arn: Option<String>,
 
     /// Percentage of profit to pay in gas.
-    #[arg(long, required = false)]
+    #[arg(long, required = false, env = "BID_PERCENTAGE")]
     pub bid_percentage: Option<u128>,
 
     /// Determines how aggressive to scale the fallback bids
     /// 100 (default) = 1% of the profit
-    #[arg(long, required = false)]
+    #[arg(long, required = false, env = "FALLBACK_BID_SCALE_FACTOR")]
     pub fallback_bid_scale_factor: Option<u64>,
 
     /// Minimum block percentage buffer for priority orders.
     /// This determines how much time to wait before the target block to submit the fill transaction.
     /// Example: 120 = 120% of the block time which would be 2.4 seconds with a block time of 2 seconds.
-    #[arg(long, required = false)]
+    #[arg(long, required = false, env = "MIN_BLOCK_PERCENTAGE_BUFFER")]
     pub min_block_percentage_buffer: Option<u64>,
 
     /// Private key for sending txs.
-    #[arg(long, required = true)]
+    #[arg(long, required = false, env = "EXECUTOR_ADDRESS")]
     pub executor_address: String,
 
     /// Order type to use.
-    #[arg(long, required = true)]
+    #[arg(long, required = false, env = "ORDER_TYPE")]
     pub order_type: OrderType,
 
     /// Enable CloudWatch logging
-    #[arg(long, group = "aws_features")]
+    #[arg(long, group = "aws_features", env = "CLOUDWATCH_METRICS")]
     pub cloudwatch_metrics: bool,
 
     /// chain id
-    #[arg(long, required = true)]
+    #[arg(long, required = false, env = "CHAIN_ID")]
     pub chain_id: u64,
 
     /// Optional UniswapX API Key
-    #[arg(long)]
+    #[arg(long, env = "MIMBOKU_API_KEY")]
     pub uniswapx_api_key: Option<String>,
 }
 

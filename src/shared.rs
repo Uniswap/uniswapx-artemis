@@ -1,8 +1,41 @@
 use std::sync::Arc;
 
-use alloy::{network::{AnyNetwork, EthereumWallet, TransactionBuilder, ReceiptResponse}, providers::{DynProvider, Provider}, rpc::types::TransactionRequest, serde::WithOtherFields};
+use alloy::{
+    network::{AnyNetwork, EthereumWallet, ReceiptResponse, TransactionBuilder},
+    providers::{DynProvider, Provider},
+    rpc::types::TransactionRequest,
+    serde::WithOtherFields,
+};
 use alloy_primitives::{Address, U256};
 use serde::Deserialize;
+
+// Centralized environment variable functions
+pub fn get_reactor_address(strategy_type: &str) -> String {
+    let env_var = format!("REACTOR_ADDRESS_{}", strategy_type.to_uppercase());
+    std::env::var(&env_var)
+        .or_else(|_| std::env::var("REACTOR_ADDRESS"))
+        .unwrap_or_else(|_| {
+            match strategy_type {
+                "limit" => "0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87",
+                "dutchv3" => "0xB274d5F4b833b61B340b654d600A864fB604a87c",
+                "uniswap" => "0x00000011F84B9aa48e5f8aA8B9897600006289Be",
+                "priority" => "0x000000001Ec5656dcdB24D90DFa42742738De729",
+                _ => "0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87", // default
+            }
+            .to_string()
+        })
+}
+
+pub fn get_routing_api() -> String {
+    std::env::var("ROUTING_API")
+        .unwrap_or_else(|_| "https://router-dev.mimboku.com/quote".to_string())
+}
+
+pub fn get_uniswapx_api_url() -> String {
+    std::env::var("MIMBOKU_API_URL").unwrap_or_else(|_| {
+        "https://j6nfzv9j4e.execute-api.us-east-1.amazonaws.com/prod/limit".to_string()
+    })
+}
 
 const NONCE_BURN_GAS_MULTIPLIER: u128 = 10;
 const NONCE_BURN_PRIORITY_FEE: u128 = 1e7 as u128; // 0.01 gwei (max priority bid possible)
@@ -51,7 +84,6 @@ pub struct RouteInfo {
     pub method_parameters: MethodParameters,
 }
 
-
 pub async fn get_nonce_with_retry(
     sender_client: &Arc<DynProvider<AnyNetwork>>,
     address: Address,
@@ -93,9 +125,7 @@ pub async fn burn_nonce(
     nonce: u64,
     order_hash: &str,
 ) -> Result<(), anyhow::Error> {
-    let base_fee = provider
-        .get_gas_price()
-        .await?;
+    let base_fee = provider.get_gas_price().await?;
 
     // Create a dummy transaction that sends 0 ETH to self with high gas price
     let tx_request = WithOtherFields::new(TransactionRequest {
@@ -124,25 +154,39 @@ pub async fn burn_nonce(
                 .map_err(|e| {
                     anyhow::anyhow!("{} - Error waiting for confirmations: {}", order_hash, e)
                 });
-                
+
             match receipt {
                 Ok(receipt) => {
                     let status = receipt.status();
                     tracing::info!(
                         "{} - Nonce burn: tx_hash: {:?}, status: {}",
-                        order_hash, receipt.transaction_hash, status,
+                        order_hash,
+                        receipt.transaction_hash,
+                        status,
                     );
                     Ok(())
                 }
                 Err(e) => {
                     tracing::error!("{} - Error burning nonce: {}", order_hash, e);
-                    return Err(anyhow::anyhow!("{} - Error burning nonce: {}", order_hash, e));
+                    return Err(anyhow::anyhow!(
+                        "{} - Error burning nonce: {}",
+                        order_hash,
+                        e
+                    ));
                 }
             }
         }
         Err(e) => {
-            tracing::error!("{} - Error sending nonce burn transaction: {}", order_hash, e);
-            return Err(anyhow::anyhow!("{} - Error sending nonce burn transaction: {}", order_hash, e));
+            tracing::error!(
+                "{} - Error sending nonce burn transaction: {}",
+                order_hash,
+                e
+            );
+            return Err(anyhow::anyhow!(
+                "{} - Error sending nonce burn transaction: {}",
+                order_hash,
+                e
+            ));
         }
     }
 }
