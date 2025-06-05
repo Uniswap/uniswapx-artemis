@@ -11,9 +11,8 @@ use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 
-// static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static UNISWAPX_API_URL: &str = "https://j6nfzv9j4e.execute-api.us-east-1.amazonaws.com/prod/limit";
-static POLL_INTERVAL_MS: u64 = 250;
+static POLL_INTERVAL_MS: u64 = 5000; // 5 seconds
 
 #[derive(Debug)]
 pub enum OrderTypeError {
@@ -124,8 +123,6 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             "{}/orders?orderStatus=open&chainId={}&orderType={}&limit=500&executeAddress={}",
             self.base_url, self.chain_id, self.order_type, self.execute_address,
         );
-
-        println!("url: {}", url);
 
         tracing::info!(
             chain_id = self.chain_id,

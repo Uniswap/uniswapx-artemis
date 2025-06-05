@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tokio::time::Duration;
 
-const BLOCK_POLLING_INTERVAL: Duration = Duration::from_secs(1);
+const BLOCK_POLLING_INTERVAL: Duration = Duration::from_secs(3);
 
 /// A collector that listens for new blocks, and generates a stream of
 /// [events](NewBlock) which contain the block number and hash.

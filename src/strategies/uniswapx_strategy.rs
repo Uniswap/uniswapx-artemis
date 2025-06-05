@@ -28,7 +28,7 @@ use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, collections::HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 use uniswapx_rs::order::{Order, OrderResolution, V2DutchOrder};
@@ -52,6 +52,8 @@ pub struct UniswapXUniswapFill {
     last_block_timestamp: u64,
     // map of open order hashes to order data
     open_orders: HashMap<String, OrderData>,
+    // map of order hashes that are currently being processed (routed/executed)
+    processing_orders: HashSet<String>,
     // map of done order hashes to time at which we can safely prune them
     done_orders: HashMap<String, u64>,
     batch_sender: Sender<Vec<OrderBatchData>>,
@@ -80,6 +82,7 @@ impl UniswapXUniswapFill {
             last_block_number: 0,
             last_block_timestamp: 0,
             open_orders: HashMap::new(),
+            processing_orders: HashSet::new(),
             done_orders: HashMap::new(),
             batch_sender: sender,
             route_receiver: receiver,
@@ -148,22 +151,32 @@ impl UniswapXUniswapFill {
         {
             return vec![];
         }
+        
         let OrderBatchData {
-            // orders,
             orders,
             amount_required: amount_out_required,
             ..
         } = &event.request;
 
+        // Filter out orders that are already being processed
+        let filtered_orders: Vec<OrderData> = orders
+            .iter()
+            .filter(|o| !self.processing_orders.contains(&o.hash))
+            .cloned()
+            .collect();
+        if filtered_orders.is_empty() {
+            return vec![];
+        }
+
         if let Some(profit) = self.get_profit_eth(event) {
             info!(
                 "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
-                orders.len(),
+                filtered_orders.len(),
                 event.route.quote_gas_adjusted,
                 amount_out_required,
                 profit
             );
-            let signed_orders = self.get_signed_orders(orders.clone()).unwrap_or_else(|e| {
+            let signed_orders = self.get_signed_orders(filtered_orders.clone()).unwrap_or_else(|e| {
                 error!("Error getting signed orders: {}", e);
                 vec![]
             });
@@ -178,6 +191,10 @@ impl UniswapXUniswapFill {
                 .await;
             match fill_tx_request {
                 Ok(fill_tx_request) => {
+                    // Mark orders as processing to prevent duplicate execution
+                    for order in filtered_orders.iter() {
+                        self.processing_orders.insert(order.hash.clone());
+                    }
                     return vec![Action::SubmitTx(SubmitTxToMempool {
                         tx: fill_tx_request,
                         gas_bid_info: Some(GasBidInfo {
@@ -218,10 +235,11 @@ impl UniswapXUniswapFill {
         self.last_block_timestamp = event.timestamp;
 
         info!(
-            "Processing block {} at {}, Order set sizes -- open: {}, done: {}",
+            "Processing block {} at {}, Order set sizes -- open: {}, processing: {}, done: {}",
             event.number,
             event.timestamp,
             self.open_orders.len(),
+            self.processing_orders.len(),
             self.done_orders.len()
         );
         self.handle_fills().await.unwrap_or_else(|e| {
@@ -265,8 +283,11 @@ impl UniswapXUniswapFill {
     fn get_order_batches(&self) -> HashMap<TokenInTokenOut, OrderBatchData> {
         let mut order_batches: HashMap<TokenInTokenOut, OrderBatchData> = HashMap::new();
 
-        // group orders by token in and token out
-        self.open_orders.iter().for_each(|(_, order_data)| {
+        // group orders by token in and token out, excluding orders being processed
+        self.open_orders
+            .iter()
+            .filter(|(_, order_data)| !self.processing_orders.contains(&order_data.hash))
+            .for_each(|(_, order_data)| {
             let token_in_token_out = TokenInTokenOut {
                 token_in: order_data.resolved.input.token.clone(),
                 token_out: order_data.resolved.outputs[0].token.clone(),
@@ -320,9 +341,10 @@ impl UniswapXUniswapFill {
         let logs = self.client.get_logs(&filter).await?;
         for log in logs {
             let order_hash = format!("0x{:x}", log.topics()[1]);
-            // remove from open
+            // remove from open and processing
             info!("{} - Removing filled order", order_hash);
             self.open_orders.remove(&order_hash);
+            self.processing_orders.remove(&order_hash);
             // add to done
             self.done_orders.insert(
                 order_hash.to_string(),
@@ -369,6 +391,9 @@ impl UniswapXUniswapFill {
     fn mark_as_done(&mut self, order: &str) {
         if self.open_orders.contains_key(order) {
             self.open_orders.remove(order);
+        }
+        if self.processing_orders.contains(order) {
+            self.processing_orders.remove(order);
         }
         if !self.done_orders.contains_key(order) {
             self.done_orders

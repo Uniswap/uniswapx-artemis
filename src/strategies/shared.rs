@@ -100,9 +100,6 @@ pub trait UniswapXStrategy {
 
         info!("route: {:?}", route.route);
 
-        // let execute_bytes = &route.method_parameters.calldata;
-        // let encoded_execute_bytes = hex::decode(&execute_bytes[2..]).expect("Failed to decode hex");
-
         let encoded_execute_bytes = self
             .encode_multiroute_calldata(route_order, executor_address)
             .await;
