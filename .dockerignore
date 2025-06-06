@@ -4,12 +4,67 @@
 # For more help, visit the .dockerignore file reference guide at
 # https://docs.docker.com/go/build-context-dockerignore/
 
-**/.DS_Store
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Environment and secrets
+.env*
+*.pem
+*.key
+
+# Docker files (except Dockerfile)
+.dockerignore
+docker-compose*.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+Jenkinsfile
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Test artifacts
+coverage/
+*.profraw
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Linux
+*~
+
 **/.classpath
-**/.dockerignore
 **/.env
-**/.git
-**/.gitignore
 **/.project
 **/.settings
 **/.toolstarget
@@ -27,6 +82,5 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 /bin
-/target
 LICENSE
 README.md

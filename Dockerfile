@@ -11,43 +11,71 @@ ARG APP_NAME=uniswapx-artemis
 
 ################################################################################
 # Create a stage for building the application.
-
 FROM public.ecr.aws/docker/library/rust:${RUST_VERSION}-bookworm AS build
 ARG APP_NAME
 WORKDIR /app
 
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# AWS CodeBuild doesn't seem to support buildkit so can't use --mount
-COPY . .
+# Copy manifests first for better Docker layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+
+# Create src directory and dummy main to enable dependency caching
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Build dependencies (cached layer)
+RUN cargo build --locked --release && rm -rf src
+
+# Copy source code
+COPY src/ ./src/
+
+# Build the application with proper release optimizations
 RUN cargo build --locked --release && \
-cp ./target/release/$APP_NAME /bin/server
+    cp ./target/release/$APP_NAME /bin/server
 
 ################################################################################
-# Create a new stage for running the application that contains the minimal
-# runtime dependencies for the application. This often uses a different base
-# image from the build stage where the necessary files are copied from the build
-# stage.
-#
+# Create runtime stage
 FROM public.ecr.aws/debian/debian:bookworm-slim AS final
-RUN apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get update -y && \
+
+# Install runtime dependencies
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    libssl3 \
-    ca-certificates && \
+        libssl3 \
+        ca-certificates \
+        tini && \
     update-ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
 
-# Copy the executable from the "build" stage.
-COPY --from=build /bin/server /bin/
+# Create a non-root user for security
+RUN groupadd -r artemis && useradd -r -g artemis artemis
 
-# Expose the port that the application listens on.
-EXPOSE 1559
+# Copy the executable from the build stage
+COPY --from=build /bin/server /usr/local/bin/artemis
 
-# Add Tini
-# Tini helps with the problem of accidentally created zombie processes, and also makes sure that the signal handlers work
-# see https://github.com/krallin/tini for detail
-ENV TINI_VERSION=v0.19.0
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
-RUN chmod +x /tini
-ENTRYPOINT ["/tini", "--"]
+# Set proper ownership and permissions
+RUN chown artemis:artemis /usr/local/bin/artemis && \
+    chmod +x /usr/local/bin/artemis
+
+# Switch to non-root user
+USER artemis
+
+# Set default environment variables (can be overridden)
+ENV RUST_LOG=info
+ENV RUST_BACKTRACE=1
+
+# Health check (optional - can be enabled if needed)
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+#   CMD /usr/local/bin/artemis --help || exit 1
+
+# Use tini as init system to handle signals properly
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Run the application
+CMD ["/usr/local/bin/artemis"]

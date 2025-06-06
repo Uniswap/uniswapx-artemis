@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  uniswapx-artemis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: uniswapx-artemis:latest
+    container_name: uniswapx-artemis
+    restart: unless-stopped
+    
+    # Environment variables - override with .env file or docker-compose.override.yml
+    environment:
+      # Network Configuration
+      - HTTP_ENDPOINT=${HTTP_ENDPOINT:-https://aeneid.storyrpc.io}
+      - WSS_ENDPOINT=${WSS_ENDPOINT:-}
+      - CHAIN_ID=${CHAIN_ID:-1315}
+      
+      # Required Configuration
+      - EXECUTOR_ADDRESS=${EXECUTOR_ADDRESS}
+      - ORDER_TYPE=${ORDER_TYPE:-Limit}
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      
+      # Strategy Configuration
+      - BID_PERCENTAGE=${BID_PERCENTAGE:-1}
+      - FALLBACK_BID_SCALE_FACTOR=${FALLBACK_BID_SCALE_FACTOR:-100}
+      - MIN_BLOCK_PERCENTAGE_BUFFER=${MIN_BLOCK_PERCENTAGE_BUFFER:-120}
+      
+      # Reactor Addresses
+      - REACTOR_ADDRESS=${REACTOR_ADDRESS:-0x5F88087fbc0c47e9aC7Dbda8Bb561127735EEC87}
+      - REACTOR_ADDRESS_LIMIT=${REACTOR_ADDRESS_LIMIT:-}
+      - REACTOR_ADDRESS_DUTCHV3=${REACTOR_ADDRESS_DUTCHV3:-}
+      - REACTOR_ADDRESS_UNISWAP=${REACTOR_ADDRESS_UNISWAP:-}
+      - REACTOR_ADDRESS_PRIORITY=${REACTOR_ADDRESS_PRIORITY:-}
+      
+      # API Configuration
+      - ROUTING_API=${ROUTING_API:-https://router-dev.mimboku.com/quote}
+      - MIMBOKU_API_URL=${MIMBOKU_API_URL:-https://j6nfzv9j4e.execute-api.us-east-1.amazonaws.com/prod/limit}
+      - MIMBOKU_API_KEY=${MIMBOKU_API_KEY:-}
+      
+      # AWS Configuration
+      - CLOUDWATCH_METRICS=${CLOUDWATCH_METRICS:-false}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      
+      # Logging
+      - RUST_LOG=${RUST_LOG:-info}
+      - RUST_BACKTRACE=${RUST_BACKTRACE:-1}
+    
+    # Load environment variables from .env file
+    env_file:
+      - .env
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "ps", "aux", "|", "grep", "artemis"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25' 
