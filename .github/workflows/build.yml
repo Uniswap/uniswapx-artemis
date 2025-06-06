@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches:
+      - dev
+      - main
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set environment variable
+        run: |
+          SHORT_SHA_COMMIT=$(git rev-parse --short HEAD)
+          echo CONTAINER_RELEASE_IMAGE=ghcr.io/tentou-tech/uniswapx-artemis:${GITHUB_REF_NAME}_${SHORT_SHA_COMMIT} >> $GITHUB_ENV
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+          tags: |
+            ${{ env.CONTAINER_RELEASE_IMAGE }}
+  update-manifest:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set environment variable
+        run: |
+          SHORT_SHA_COMMIT=$(git rev-parse --short HEAD)
+          echo CONTAINER_RELEASE_IMAGE=ghcr.io/tentou-tech/uniswapx-artemis:${GITHUB_REF_NAME}_${SHORT_SHA_COMMIT} >> $GITHUB_ENV
+          echo REPO_MANIFEST_NAME=gitops >> $GITHUB_ENV
+          echo REPO_MANIFEST_URL=github.com/tentou-tech/gitops.git >> $GITHUB_ENV
+          echo REPO_MANIFEST_BRANCH=main >> $GITHUB_ENV
+          echo REPO_MANIFEST_ENV_MAIN=./clusters/k8s-main/mimboku-aggregator >> $GITHUB_ENV
+          echo REPO_MANIFEST_ENV_DEV=./clusters/k8s-dev/mimboku-aggregator >> $GITHUB_ENV
+          echo REPO_MANIFEST_TAG_IMAGE=image_uniswapx_artemis >> $GITHUB_ENV
+      - name: Update manifest
+        env:
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          chmod 777 -R ./ci
+          ./ci/updateManifest.sh
