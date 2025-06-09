@@ -31,6 +31,8 @@ pub const EXECUTION_SKIPPED_PAST_DEADLINE_METRIC: &str = "ExecutionSkippedPastDe
 pub const UNPROFITABLE_METRIC: &str = "Unprofitable";
 pub const TARGET_BLOCK_DELTA: &str = "TargetBlockDelta";
 pub const REVERT_CODE_METRIC: &str = "RevertCode";
+pub const KEYS_IN_USE: &str = "KeysInUse";
+pub const KEYS_AVAILABLE: &str = "KeysAvailable";
 
 pub enum DimensionName {
     Service,
@@ -100,6 +102,10 @@ pub enum CwMetrics {
     Balance(String),
     // negative is too early, positive is too late
     TargetBlockDelta(u64),
+    
+    /// Keystore metrics
+    KeysInUse(u64),      // chain_id
+    KeysAvailable(u64),  // chain_id
 }
 impl From<CwMetrics> for String {
     fn from(metric: CwMetrics) -> Self {
@@ -128,6 +134,8 @@ impl From<CwMetrics> for String {
             CwMetrics::LatestBlock(chain_id) => format!("{}-{}", chain_id, LATEST_BLOCK),
             CwMetrics::TargetBlockDelta(chain_id) => format!("{}-{}", chain_id, TARGET_BLOCK_DELTA),
             CwMetrics::RevertCode(chain_id, code) => format!("{}-{}-{}", chain_id, REVERT_CODE_METRIC, code),
+            CwMetrics::KeysInUse(chain_id) => format!("{}-{}", chain_id, KEYS_IN_USE),
+            CwMetrics::KeysAvailable(chain_id) => format!("{}-{}", chain_id, KEYS_AVAILABLE),
         }
     }
 }
