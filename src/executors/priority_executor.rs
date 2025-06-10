@@ -294,6 +294,29 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             if let Some(metric_future) = metric_future {
                 send_metric_with_order_hash!(&order_hash, metric_future);
             }
+            // send keystore metrics in the background
+            let keys_in_use = self.key_store.get_keys_in_use();
+            let keys_available = self.key_store.get_keys_available();
+
+            let keys_in_use_future = build_metric_future(
+                self.cloudwatch_client.clone(),
+                DimensionValue::PriorityExecutor,
+                CwMetrics::KeysInUse(chain_id_u64),
+                keys_in_use as f64,
+            );
+            if let Some(metric_future) = keys_in_use_future {
+                send_metric_with_order_hash!(&order_hash, metric_future);
+            }
+
+            let keys_available_future = build_metric_future(
+                self.cloudwatch_client.clone(),
+                DimensionValue::PriorityExecutor,
+                CwMetrics::KeysAvailable(chain_id_u64),
+                keys_available as f64,
+            );
+            if let Some(metric_future) = keys_available_future {
+                send_metric_with_order_hash!(&order_hash, metric_future);
+            }
 
             // Acquire a key from the key store
             let (addr, private_key) = self

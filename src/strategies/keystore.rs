@@ -1,6 +1,7 @@
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, Notify};
 use tracing::info;
 
@@ -49,6 +50,7 @@ impl PartialEq for PrivateKey {
 pub struct KeyStore {
     keys: HashMap<String, Arc<Mutex<(PrivateKey, bool)>>>,
     notify: Arc<Notify>,
+    keys_in_use_count: Arc<AtomicUsize>,  // Track in-use count efficiently
 }
 
 impl KeyStore {
@@ -56,6 +58,7 @@ impl KeyStore {
         KeyStore {
             keys: HashMap::new(),
             notify: Arc::new(Notify::new()),
+            keys_in_use_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -82,6 +85,7 @@ impl KeyStore {
                 let (private_key, in_use) = &mut *key_data;
                 if !*in_use {
                     *in_use = true;
+                    self.keys_in_use_count.fetch_add(1, Ordering::Relaxed);
                     return Ok((public_address.clone(), private_key.clone()));
                 }
             }
@@ -94,7 +98,10 @@ impl KeyStore {
         if let Some(key_mutex) = self.keys.get(&public_address) {
             let mut key_data = key_mutex.lock().await;
             let (_, in_use) = &mut *key_data;
-            *in_use = false;
+            if *in_use {  // Only decrement if it was actually in use
+                *in_use = false;
+                self.keys_in_use_count.fetch_sub(1, Ordering::Relaxed);
+            }
             self.notify.notify_one();
             Ok(())
         } else {
@@ -108,6 +115,16 @@ impl KeyStore {
 
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// Get the number of keys currently in use (O(1) operation)
+    pub fn get_keys_in_use(&self) -> usize {
+        self.keys_in_use_count.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of keys available (O(1) operation)
+    pub fn get_keys_available(&self) -> usize {
+        self.len() - self.get_keys_in_use()
     }
 }
 
