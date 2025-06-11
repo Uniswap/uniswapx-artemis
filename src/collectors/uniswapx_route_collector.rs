@@ -380,8 +380,8 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
 
 // The Uniswap routing API requires that "ETH" be used instead of the zero address
 fn resolve_address(token: String) -> String {
-    if token == "0x0000000000000000000000000000000000000000" {
-        return "ETH".to_string();
-    }
+    // if token == "0x0000000000000000000000000000000000000000" {
+    //     return "ETH".to_string();
+    // }
     token
 }
