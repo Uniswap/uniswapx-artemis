@@ -56,7 +56,7 @@ struct RoutingApiQuery {
     #[serde(rename = "type")]
     trade_type: TradeType,
     amount: String,
-    recipient: String,
+    recipient: Option<String>,
     slippage_tolerance: String,
     deadline: u64,
     #[serde(rename = "enableUniversalRouter")]
@@ -211,9 +211,9 @@ impl UniswapXRouteCollector {
             token_out_chain_id: params.chain_id,
             trade_type: params.trade_type,
             amount: params.amount,
-            recipient: params.recipient,
+            recipient: None,
             slippage_tolerance: SLIPPAGE_TOLERANCE.to_string(),
-            enable_universal_router: true,
+            enable_universal_router: false,
             deadline: DEADLINE,
             protocols: "v2,v3,v3s1,mixed".to_string(),
         };
