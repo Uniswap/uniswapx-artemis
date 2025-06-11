@@ -294,7 +294,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             if let Some(metric_future) = metric_future {
                 send_metric_with_order_hash!(&order_hash, metric_future);
             }
-            // send keystore metrics in the background
+            // send keystore metrics
             let keys_in_use = self.key_store.get_keys_in_use();
             let keys_available = self.key_store.get_keys_available();
 
