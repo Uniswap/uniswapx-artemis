@@ -145,7 +145,7 @@ pub struct OrderRoute {
     pub gas_use_estimate_quote: String,
     pub gas_use_estimate: String,
     pub route: Vec<Vec<Route>>,
-    pub method_parameters: MethodParameters,
+    pub method_parameters: Option<MethodParameters>,
 }
 
 pub struct RouteOrderParams {
