@@ -415,7 +415,7 @@ impl UniswapXPriorityFill {
                     gas_use_estimate: event.route.gas_use_estimate.clone(),
                     gas_use_estimate_quote: event.route.gas_use_estimate_quote.clone(),
                     gas_price_wei: event.route.gas_price_wei.clone(),
-                    method_parameters: event.route.method_parameters.clone(),
+                    method_parameters: event.route.method_parameters.clone().unwrap(),
                 });
 
                 // Check if order is fillable
@@ -813,12 +813,12 @@ impl UniswapXPriorityFill {
                                     .gas_use_estimate
                                     .clone(),
                                 route: vec![],
-                                method_parameters: order_data
+                                method_parameters: Some(order_data
                                     .route
                                     .as_ref()
                                     .unwrap()
                                     .method_parameters
-                                    .clone(),
+                                    .clone()),
                             },
                             target_block: Some(order.cosignerData.auctionTargetBlock),
                         };
