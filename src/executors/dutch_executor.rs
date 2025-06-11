@@ -68,6 +68,30 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
             send_metric!(metric_future);
         }
 
+        // send keystore metrics
+        let keys_in_use = self.key_store.get_keys_in_use();
+        let keys_available = self.key_store.get_keys_available();
+
+        let keys_in_use_future = build_metric_future(
+            self.cloudwatch_client.clone(),
+            DimensionValue::V3Executor,
+            CwMetrics::KeysInUse(chain_id),
+            keys_in_use as f64,
+        );
+        if let Some(metric_future) = keys_in_use_future {
+            send_metric!(metric_future);
+        }
+
+        let keys_available_future = build_metric_future(
+            self.cloudwatch_client.clone(),
+            DimensionValue::V3Executor,
+            CwMetrics::KeysAvailable(chain_id),
+            keys_available as f64,
+        );
+        if let Some(metric_future) = keys_available_future {
+            send_metric!(metric_future);
+        }
+
         // Acquire a key from the key store
         let (addr, private_key) = self
             .key_store
