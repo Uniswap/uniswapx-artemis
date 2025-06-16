@@ -37,6 +37,7 @@ const QUOTE_ETH_LOG10_THRESHOLD: usize = 8;
 // The number of bps to add to the base bid for each fallback bid
 const DEFAULT_FALLBACK_BID_SCALE_FACTOR: u64 = 50;
 const CONFIRMATION_TIMEOUT_SEC: u64 = 10;
+const RECEIPT_POLL_INTERVAL_MS: u64 = 250;
 
 const UNICHAIN_ID: u64 = 130;
 
@@ -366,7 +367,7 @@ impl PriorityExecutor {
                 }
             }
             
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(RECEIPT_POLL_INTERVAL_MS)).await;
         }
         
         Ok(None)
