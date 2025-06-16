@@ -90,7 +90,7 @@ impl PriorityExecutor {
                 1.0,
             );
             if let Some(metric_future) = metric_future {
-                send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
+                send_metric_with_order_hash!(order_hash, metric_future);
             }
         }
     }
@@ -451,10 +451,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                 .execution
                 .tx
                 .chain_id()
-                .expect("Chain ID not found on transaction")
-                .to_string()
-                .parse::<u64>()
-                .unwrap();
+                .context("Chain ID not found on transaction")?;
 
             let metric_future = build_metric_future(
                 self.cloudwatch_client.clone(),
@@ -501,16 +498,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             
             info!("{} - Acquired key: {}", order_hash, addr);
 
-            let chain_id = u64::from_str_radix(
-                &action
-                    .execution
-                    .tx
-                    .chain_id()
-                    .expect("Chain ID not found on transaction")
-                    .to_string(),
-                10,
-            )
-            .expect("Failed to parse chain ID");
+            let chain_id = chain_id_u64;
 
             let wallet = EthereumWallet::from(
                 private_key
@@ -540,7 +528,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                 .client
                 .get_gas_price()
                 .await
-                .context("Error getting gas price: {}")?;
+                .context("Error getting gas price")?;
             let bid_priority_fees = self.get_bids_for_order(&action, &order_hash);
 
             if bid_priority_fees.len() == 0 {
@@ -614,7 +602,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                     1.0,
                 );
                 if let Some(metric_future) = metric_future {
-                    send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
+                    send_metric_with_order_hash!(&order_hash, metric_future);
                 }
 
                 // Create futures for all transactions
