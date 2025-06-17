@@ -2,31 +2,31 @@ use std::{str::FromStr, sync::Arc};
 use tracing::{info, warn, debug};
 
 use alloy::{
-    eips::{BlockId, BlockNumberOrTag, eip2718::Encodable2718},
-    network::{AnyNetwork, EthereumWallet, TransactionBuilder, ReceiptResponse},
+    eips::{BlockId, BlockNumberOrTag},
+    network::{AnyNetwork, EthereumWallet, TransactionBuilder},
     primitives::{utils::format_units, Address, U128, U256},
     providers::{DynProvider, Provider},
     rpc::types::TransactionRequest,
     serde::WithOtherFields,
     signers::{local::PrivateKeySigner, Signer},
-    hex,
 };
 use anyhow::{Context, Result};
 use artemis_core::types::Executor;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use uniswapx_rs::order::BPS;
-use serde_json::{json, Value};
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        build_metric_future, receipt_status_to_metric, revert_code_to_metric, CwMetrics, DimensionValue
+        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue
     }, 
-    executors::reactor_error_code::ReactorErrorCode, 
-    shared::{burn_nonce, get_nonce_with_retry, send_metric_with_order_hash, u256},
+    executors::{
+        bundle_client::BundleClient,
+        transaction_utils::{poll_for_receipt, process_receipt, handle_send_error, TransactionOutcome},
+    },
+    shared::{get_nonce_with_retry, send_metric_with_order_hash, u256},
     strategies::{keystore::KeyStore, types::SubmitTxToMempoolWithExecutionMetadata}
 };
-use crate::executors::reactor_error_code::get_revert_reason;
 
 const GAS_LIMIT: u64 = 1_000_000;
 const MAX_RETRIES: u32 = 3;
@@ -49,13 +49,7 @@ pub struct PriorityExecutor {
     sender_client: Arc<DynProvider<AnyNetwork>>,
     key_store: Arc<KeyStore>,
     cloudwatch_client: Option<Arc<CloudWatchClient>>,
-}
-
-#[derive(Debug)]
-enum TransactionOutcome {
-    Success(Option<u64>),
-    Failure(Option<u64>),
-    RetryableFailure,
+    bundle_client: BundleClient,
 }
 
 impl PriorityExecutor {
@@ -65,11 +59,13 @@ impl PriorityExecutor {
         key_store: Arc<KeyStore>,
         cloudwatch_client: Option<Arc<CloudWatchClient>>,
     ) -> Self {
+        let bundle_client = BundleClient::new(sender_client.clone());
         Self {
             client,
             sender_client,
             key_store,
             cloudwatch_client,
+            bundle_client,
         }
     }
 
@@ -107,103 +103,36 @@ impl PriorityExecutor {
         target_block: Option<u64>,
     ) -> Result<TransactionOutcome> {
         let tx_request_for_revert = tx_request.clone();
-        let tx = tx_request.build(wallet).await?;
+        let tx_envelope = tx_request.build(wallet).await?;
         info!("{} - Sending transaction to RPC", order_hash);
-        let result = self.sender_client.send_tx_envelope(tx).await;
-
-        match result {
+        
+        match self.sender_client.send_tx_envelope(tx_envelope.clone()).await {
             Ok(tx) => {
                 info!("{} - Waiting for confirmations", order_hash);
                 let receipt = match tokio::time::timeout(
                     std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC),
                     tx.with_required_confirmations(0).get_receipt()
                 ).await {
-                    Ok(receipt_result) => receipt_result.map_err(|e| {
-                        anyhow::anyhow!("{} - Error waiting for confirmations: {}", order_hash, e)
-                    }),
+                    Ok(receipt_result) => receipt_result.ok(),
                     Err(_) => {
                         warn!("{} - Timed out waiting for transaction receipt", order_hash);
                         return Ok(TransactionOutcome::Failure(None));
                     }
                 };
                 
-
-                match receipt {
-                    Ok(receipt) => {
-                        let target_block_delta: f64 = receipt.block_number.unwrap() as f64 - target_block.unwrap() as f64;
-                        if let Some(target_block) = target_block {
-                            info!("{} - target block delta: {}, target_block: {}, actual_block: {}", order_hash, target_block_delta, target_block, receipt.block_number.unwrap());
-                        }
-                        let metric_future = build_metric_future(
-                            self.cloudwatch_client.clone(),
-                            DimensionValue::PriorityExecutor,
-                            CwMetrics::TargetBlockDelta(chain_id),
-                            target_block_delta as f64,
-                        );
-                        if let Some(metric_future) = metric_future {
-                            send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
-                        }
-                        let status = receipt.status();
-                        info!(
-                            "{} - receipt: tx_hash: {:?}, status: {}",
-                            order_hash, receipt.transaction_hash, status,
-                        );
-                        
-                        if !status && receipt.block_number.is_some() {
-                            info!("{} - Attempting to get revert reason", order_hash);
-                            // Parse revert reason
-                            match get_revert_reason(&self.client, tx_request_for_revert, receipt.block_number.unwrap()).await {
-                            
-                                Ok(reason) => {
-                                    info!("{} - Revert reason: {}", order_hash, reason);
-                                    let metric_future = build_metric_future(
-                                        self.cloudwatch_client.clone(),
-                                        DimensionValue::PriorityExecutor,
-                                        revert_code_to_metric(chain_id, reason.to_string()),
-                                        1.0,
-                                    );
-                                    if let Some(metric_future) = metric_future {
-                                        // do not block current thread by awaiting in the background
-                                        send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
-                                    }
-                                    // Retry if the order isn't yet fillable
-                                    if matches!(reason, ReactorErrorCode::OrderNotFillable) {
-                                        return Ok(TransactionOutcome::RetryableFailure);
-                                    }
-                                    else {
-                                        info!("{} - Order not fillable, returning failure", order_hash);
-                                        return Ok(TransactionOutcome::Failure(receipt.block_number));
-                                    }
-                                }
-                                Err(e) => {
-                                    info!("{} - Failed to get revert reason - error: {:?}", order_hash, e);
-                                    Ok(TransactionOutcome::Failure(None))
-                                }
-                            }
-                        } else {
-                            Ok(TransactionOutcome::Success(receipt.block_number))
-                        }
-                    }
-                    Err(e) => {
-                        warn!("{} - Error waiting for confirmations: {}", order_hash, e);
-                        Ok(TransactionOutcome::Failure(None))
-                    }
-                }
+                // Process receipt
+                process_receipt(
+                    receipt,
+                    &self.client,
+                    tx_request_for_revert,
+                    order_hash,
+                    chain_id,
+                    target_block,
+                    self.cloudwatch_client.clone(),
+                ).await
             }
             Err(e) => {
-                warn!("{} - Error sending transaction: {}", order_hash, e);
-                // If the nonce is already used, burn the nonce for the next transaction
-                if e.to_string().contains("replacement transaction underpriced") {
-                    info!("{} - Nonce already used, burning nonce for next transaction", order_hash);
-                    burn_nonce(
-                        &self.sender_client,
-                        wallet,
-                        tx_request_for_revert.from.unwrap(),
-                        tx_request_for_revert.nonce.unwrap(),
-                        order_hash
-                    ).await?;
-                }
-                Ok(TransactionOutcome::Failure(None))
+                handle_send_error(e.into(), &self.sender_client, wallet, &tx_request_for_revert, order_hash).await
             }
         }
     }
@@ -218,165 +147,38 @@ impl PriorityExecutor {
     ) -> Result<TransactionOutcome> {
         let tx_request_for_revert = tx_request.clone();
         
-        // Sign the transaction
-        let tx_envelope = tx_request.build(wallet).await?;
-        let raw_tx = tx_envelope.encoded_2718();
-        let signed_tx = format!("0x{}", hex::encode(&raw_tx));
-        
-        let tx_hash = alloy::primitives::keccak256(&raw_tx);
-        let tx_hash_hex = format!("0x{}", hex::encode(tx_hash));
-        
-        // Build bundle params (single transaction bundle that's allowed to revert)
-        let params = json!({
-            "txs": vec![signed_tx],
-            "minBlockNumber": format!("0x{:x}", target_block),
-            "maxBlockNumber": format!("0x{:x}", target_block + TARGET_BLOCK_BUNDLE_WINDOW),
-            "revertingTxHashes": vec![tx_hash_hex],
-        });
-        
-        info!("{} - Sending bundle for block {}", order_hash, target_block);
-        
-        // Send bundle
-        let bundle_result = self.sender_client
-            .raw_request::<Vec<Value>, Value>(std::borrow::Cow::Borrowed("eth_sendBundle"), vec![params])
-            .await;
-        
-        match bundle_result {
-            Ok(response) => {
-                // Extract bundle hash if available
-                let bundle_hash = response.get("bundleHash")
-                    .and_then(|h| h.as_str())
-                    .map(|s| s.to_string());
-                
-                if let Some(hash) = &bundle_hash {
-                    info!("{} - Bundle submitted with hash: {}", order_hash, hash);
-                }
-                
-                // Poll for transaction receipt
-                let receipt = match tokio::time::timeout(
-                    std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC),
-                    self.poll_for_receipt(&tx_envelope, target_block, order_hash)
-                ).await {
-                    Ok(receipt_result) => receipt_result?,
-                    Err(_) => {
-                        warn!("{} - Timed out waiting for transaction receipt", order_hash);
-                        return Ok(TransactionOutcome::Failure(None));
-                    }
-                };
-                
-                match receipt {
-                    Some(receipt) => {
-                        // Handle metrics and logging (same as original send_transaction)
-                        if let Some(block_num) = receipt.block_number {
-                            let target_block_delta = block_num as f64 - target_block as f64;
-                            info!("{} - target block delta: {}, target_block: {}, actual_block: {}", 
-                                  order_hash, target_block_delta, target_block, block_num);
-                            
-                            let metric_future = build_metric_future(
-                                self.cloudwatch_client.clone(),
-                                DimensionValue::PriorityExecutor,
-                                CwMetrics::TargetBlockDelta(chain_id),
-                                target_block_delta,
-                            );
-                            if let Some(metric_future) = metric_future {
-                                send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
-                            }
-                        }
-                        
-                        let status = receipt.status();
-                        info!("{} - receipt: tx_hash: {:?}, status: {}", 
-                              order_hash, receipt.transaction_hash, status);
-                        
-                        if !status && receipt.block_number.is_some() {
-                            // Get revert reason
-                            info!("{} - Attempting to get revert reason", order_hash);
-                            match get_revert_reason(&self.client, tx_request_for_revert, receipt.block_number.unwrap()).await {
-                                Ok(reason) => {
-                                    info!("{} - Revert reason: {}", order_hash, reason);
-                                    let metric_future = build_metric_future(
-                                        self.cloudwatch_client.clone(),
-                                        DimensionValue::PriorityExecutor,
-                                        revert_code_to_metric(chain_id, reason.to_string()),
-                                        1.0,
-                                    );
-                                    if let Some(metric_future) = metric_future {
-                                        send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
-                                    }
-                                    
-                                    if matches!(reason, ReactorErrorCode::OrderNotFillable) {
-                                        return Ok(TransactionOutcome::RetryableFailure);
-                                    } else {
-                                        return Ok(TransactionOutcome::Failure(receipt.block_number));
-                                    }
-                                }
-                                Err(e) => {
-                                    info!("{} - Failed to get revert reason: {:?}", order_hash, e);
-                                    Ok(TransactionOutcome::Failure(receipt.block_number))
-                                }
-                            }
-                        } else {
-                            Ok(TransactionOutcome::Success(receipt.block_number))
-                        }
-                    }
-                    None => {
-                        warn!("{} - No receipt found", order_hash);
-                        Ok(TransactionOutcome::Failure(None))
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("{} - Error sending bundle: {}", order_hash, e);
-                
-                // Handle nonce issues
-                if e.to_string().contains("replacement transaction underpriced") {
-                    info!("{} - Nonce already used, burning nonce for next transaction", order_hash);
-                    burn_nonce(
-                        &self.sender_client,
-                        wallet,
-                        tx_request_for_revert.from.unwrap(),
-                        tx_request_for_revert.nonce.unwrap(),
-                        order_hash
-                    ).await?;
-                }
-                
-                Ok(TransactionOutcome::Failure(None))
-            }
-        }
-    }
-
-    // Helper method to poll for receipt
-    async fn poll_for_receipt(
-        &self,
-        tx_envelope: &alloy::network::AnyTxEnvelope,
-        target_block: u64,
-        order_hash: &str,
-    ) -> Result<Option<alloy::serde::WithOtherFields<alloy::rpc::types::TransactionReceipt<alloy::network::AnyReceiptEnvelope<alloy::rpc::types::Log>>>>> {
-        // Compute the transaction hash
-        let tx_bytes = tx_envelope.encoded_2718();
-        let tx_hash = alloy::primitives::keccak256(&tx_bytes);
-        
-        let start_time = std::time::Instant::now();
-        while start_time.elapsed() < std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC) {
-            // Use sender_client to get receipt from the same endpoint
-            match self.sender_client.get_transaction_receipt(tx_hash).await {
-                Ok(Some(receipt)) => return Ok(Some(receipt)),
-                Ok(None) => {
-                    // Check if we've passed the target block
-                    let current_block = self.client.get_block_number().await?;
-                    if current_block > target_block + 1 {
-                        info!("{} - Transaction not included, target block passed", order_hash);
-                        return Ok(None);
-                    }
-                }
+        // Send bundle using bundle client
+        let (tx_envelope, _bundle_hash) = match self.bundle_client
+            .send_bundle(wallet, tx_request, target_block, TARGET_BLOCK_BUNDLE_WINDOW, order_hash)
+            .await {
+                Ok(result) => result,
                 Err(e) => {
-                    debug!("{} - Error getting receipt: {}", order_hash, e);
+                    return handle_send_error(e, &self.sender_client, wallet, &tx_request_for_revert, order_hash).await;
                 }
-            }
-            
-            tokio::time::sleep(std::time::Duration::from_millis(RECEIPT_POLL_INTERVAL_MS)).await;
-        }
+            };
         
-        Ok(None)
+        // Poll for transaction receipt
+        let receipt = match tokio::time::timeout(
+            std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC),
+            poll_for_receipt(&self.sender_client, &self.client, &tx_envelope, target_block, order_hash, CONFIRMATION_TIMEOUT_SEC, RECEIPT_POLL_INTERVAL_MS)
+        ).await {
+            Ok(receipt_result) => receipt_result?,
+            Err(_) => {
+                warn!("{} - Timed out waiting for transaction receipt", order_hash);
+                return Ok(TransactionOutcome::Failure(None));
+            }
+        };
+        
+        // Process receipt
+        process_receipt(
+            receipt,
+            &self.client,
+            tx_request_for_revert,
+            order_hash,
+            chain_id,
+            Some(target_block),
+            self.cloudwatch_client.clone(),
+        ).await
     }
 
     fn get_bids_for_order(
