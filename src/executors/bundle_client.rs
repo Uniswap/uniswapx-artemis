@@ -12,6 +12,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tracing::info;
 
+const HEX_PREFIX: &str = "0x";
+
 pub struct BundleClient {
     sender_client: Arc<DynProvider<AnyNetwork>>,
 }
@@ -33,16 +35,16 @@ impl BundleClient {
         // Sign the transaction
         let tx_envelope = tx_request.build(wallet).await?;
         let raw_tx = tx_envelope.encoded_2718();
-        let signed_tx = format!("0x{}", hex::encode(&raw_tx));
+        let signed_tx = format!("{}{}", HEX_PREFIX, hex::encode(&raw_tx));
         
         let tx_hash = keccak256(&raw_tx);
-        let tx_hash_hex = format!("0x{}", hex::encode(tx_hash));
+        let tx_hash_hex = format!("{}{}", HEX_PREFIX, hex::encode(tx_hash));
         
         // Build bundle params (single transaction bundle that's allowed to revert)
         let params = json!({
             "txs": vec![signed_tx],
-            "minBlockNumber": format!("0x{:x}", target_block),
-            "maxBlockNumber": format!("0x{:x}", target_block + bundle_window),
+            "minBlockNumber": format!("{}{:x}", HEX_PREFIX, target_block),
+            "maxBlockNumber": format!("{}{:x}", HEX_PREFIX, target_block + bundle_window),
             "revertingTxHashes": vec![tx_hash_hex],
         });
         
