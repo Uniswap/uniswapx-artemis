@@ -273,7 +273,7 @@ impl PriorityExecutor {
                                 target_block_delta,
                             );
                             if let Some(metric_future) = metric_future {
-                                send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
+                                send_metric_with_order_hash!(&order_hash, metric_future);
                             }
                         }
                         
@@ -294,7 +294,7 @@ impl PriorityExecutor {
                                         1.0,
                                     );
                                     if let Some(metric_future) = metric_future {
-                                        send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
+                                        send_metric_with_order_hash!(&order_hash, metric_future);
                                     }
                                     
                                     if matches!(reason, ReactorErrorCode::OrderNotFillable) {
