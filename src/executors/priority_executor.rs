@@ -221,11 +221,15 @@ impl PriorityExecutor {
         let raw_tx = tx_envelope.encoded_2718();
         let signed_tx = format!("0x{}", hex::encode(&raw_tx));
         
-        // Build bundle params (single transaction bundle)
+        let tx_hash = alloy::primitives::keccak256(&raw_tx);
+        let tx_hash_hex = format!("0x{}", hex::encode(tx_hash));
+        
+        // Build bundle params (single transaction bundle that's allowed to revert)
         let params = json!({
             "txs": vec![signed_tx],
             "minBlockNumber": format!("0x{:x}", target_block),
             "maxBlockNumber": format!("0x{:x}", target_block),
+            "revertingTxHashes": vec![tx_hash_hex],
         });
         
         info!("{} - Sending bundle for block {}", order_hash, target_block);
