@@ -38,6 +38,8 @@ const QUOTE_ETH_LOG10_THRESHOLD: usize = 8;
 const DEFAULT_FALLBACK_BID_SCALE_FACTOR: u64 = 50;
 const CONFIRMATION_TIMEOUT_SEC: u64 = 10;
 const RECEIPT_POLL_INTERVAL_MS: u64 = 250;
+// The number of blocks past the target block the bundle is valid for
+const TARGET_BLOCK_BUNDLE_WINDOW: u64 = 4;
 
 const UNICHAIN_ID: u64 = 130;
 
@@ -228,7 +230,7 @@ impl PriorityExecutor {
         let params = json!({
             "txs": vec![signed_tx],
             "minBlockNumber": format!("0x{:x}", target_block),
-            "maxBlockNumber": format!("0x{:x}", target_block),
+            "maxBlockNumber": format!("0x{:x}", target_block + TARGET_BLOCK_BUNDLE_WINDOW),
             "revertingTxHashes": vec![tx_hash_hex],
         });
         
@@ -277,7 +279,7 @@ impl PriorityExecutor {
                                 target_block_delta,
                             );
                             if let Some(metric_future) = metric_future {
-                                send_metric_with_order_hash!(&order_hash, metric_future);
+                                send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
                             }
                         }
                         
@@ -298,7 +300,7 @@ impl PriorityExecutor {
                                         1.0,
                                     );
                                     if let Some(metric_future) = metric_future {
-                                        send_metric_with_order_hash!(&order_hash, metric_future);
+                                        send_metric_with_order_hash!(&Arc::new(order_hash.to_string()), metric_future);
                                     }
                                     
                                     if matches!(reason, ReactorErrorCode::OrderNotFillable) {
