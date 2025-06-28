@@ -134,6 +134,12 @@ pub trait UniswapXStrategy {
         if token == Address::ZERO {
             return Ok(vec![]);
         }
+
+        // workaround for WETH, it always needs approval
+        if token == Address::from_str(WETH_ADDRESS).unwrap() {
+            return Ok(vec![Token::Address(H160(token.0 .0))])
+        }
+
         let token_contract = ERC20::new(token, client.clone());
         let allowance = token_contract
             .allowance(
