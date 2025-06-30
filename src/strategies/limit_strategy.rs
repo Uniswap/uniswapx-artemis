@@ -7,7 +7,7 @@ use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
     collectors::{
         block_collector::NewBlock,
-        uniswapx_order_collector::UniswapXOrder,
+        uniswapx_order_collector::{UniswapXOrder},
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
     shared::{send_metric_with_order_hash, RouteInfo},
@@ -54,6 +54,8 @@ pub struct LimitOrderFill {
     open_orders: HashMap<String, OrderData>,
     // map of order hashes that are currently being processed (routed/executed)
     processing_orders: HashSet<String>,
+    // map of order hashes to timestamp when they were added to processing_orders
+    processing_timestamps: HashMap<String, u64>,
     // map of done order hashes to time at which we can safely prune them
     done_orders: HashMap<String, u64>,
     batch_sender: Sender<Vec<OrderBatchData>>,
@@ -83,6 +85,7 @@ impl LimitOrderFill {
             last_block_timestamp: 0,
             open_orders: HashMap::new(),
             processing_orders: HashSet::new(),
+            processing_timestamps: HashMap::new(),
             done_orders: HashMap::new(),
             batch_sender: sender,
             route_receiver: receiver,
@@ -105,6 +108,7 @@ impl Strategy<Event, Action> for LimitOrderFill {
     async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::UniswapXOrder(order) => self.process_order_event(&order).await,
+            Event::UniswapXCancelledOrder(cancelled_order) => self.process_cancelled_order_event(&cancelled_order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
             Event::UniswapXRoute(route) => self.process_new_route(&route).await,
         }
@@ -144,6 +148,16 @@ impl LimitOrderFill {
                 event.route.as_ref(),
             );
         }
+        vec![]
+    }
+
+    // Process cancelled orders as they come in.
+    async fn process_cancelled_order_event(&mut self, event: &UniswapXOrder) -> Vec<Action> {
+        info!("Processing cancelled order: {}", event.order_hash);
+        
+        // Immediately remove the cancelled order from all states
+        self.handle_order_failure(&event.order_hash, "OrderCancelled");
+        
         vec![]
     }
 
@@ -201,8 +215,10 @@ impl LimitOrderFill {
                 Ok(fill_tx_request) => {
                     // Mark orders as processing to prevent duplicate execution
                     for order in filtered_orders.iter() {
-                        self.processing_orders.insert(order.hash.clone());
+                        self.add_to_processing(&order.hash);
                     }
+                    
+                    // Create a custom action that includes order hashes for failure handling
                     return vec![Action::SubmitTx(SubmitTxToMempool {
                         tx: fill_tx_request,
                         gas_bid_info: Some(GasBidInfo {
@@ -216,6 +232,10 @@ impl LimitOrderFill {
                         "{} - Error building fill: {}",
                         event.request.orders[0].hash, e
                     );
+                    // If we can't build the fill, mark orders as done to prevent infinite retries
+                    for order in filtered_orders.iter() {
+                        self.mark_as_done(&order.hash);
+                    }
                     return vec![];
                 }
             }
@@ -255,6 +275,11 @@ impl LimitOrderFill {
         });
         self.update_open_orders();
         self.prune_done_orders();
+        
+        // Clean up stale processing orders every 10 blocks (approximately 30 seconds)
+        if event.number % 10 == 0 {
+            self.cleanup_stale_processing_orders();
+        }
 
         self.batch_sender
             .send(self.get_order_batches().values().cloned().collect())
@@ -359,7 +384,7 @@ impl LimitOrderFill {
             // remove from open and processing
             info!("{} - Removing filled order", order_hash);
             self.open_orders.remove(&order_hash);
-            self.processing_orders.remove(&order_hash);
+            self.remove_from_processing(&order_hash);
             // add to done
             self.done_orders.insert(
                 order_hash.to_string(),
@@ -407,9 +432,7 @@ impl LimitOrderFill {
         if self.open_orders.contains_key(order) {
             self.open_orders.remove(order);
         }
-        if self.processing_orders.contains(order) {
-            self.processing_orders.remove(order);
-        }
+        self.remove_from_processing(order);
         if !self.done_orders.contains_key(order) {
             self.done_orders
                 .insert(order.to_string(), self.last_block_timestamp + DONE_EXPIRY);
@@ -458,5 +481,106 @@ impl LimitOrderFill {
             // Noop
             _ => {}
         }
+    }
+
+    /// Get order data from hash - helper method for batch failure handling
+    fn get_order_data_from_hash(&self, order_hash: &str) -> Option<OrderData> {
+        // First check if it's in open_orders (shouldn't be, but just in case)
+        if let Some(order_data) = self.open_orders.get(order_hash) {
+            return Some(order_data.clone());
+        }
+        
+        // Check if we can reconstruct from done_orders (for debugging)
+        if self.done_orders.contains_key(order_hash) {
+            warn!("{} - Order found in done_orders during batch failure handling", order_hash);
+            return None;
+        }
+        
+        None
+    }
+
+    /// Handle specific order failure (e.g., cancelled order, insufficient funds)
+    /// This method can be called when we know specific orders failed
+    pub fn handle_order_failure(&mut self, order_hash: &str, failure_reason: &str) {
+        info!("{} - Handling order failure: {}", order_hash, failure_reason);
+        
+        // Remove from processing_orders
+        if self.processing_orders.contains(order_hash) {
+            self.remove_from_processing(order_hash);
+            info!("{} - Removed from processing_orders due to failure", order_hash);
+            
+            // Determine if order should be retried or marked as done based on failure reason
+            match failure_reason {
+                "OrderAlreadyFilled" | "OrderNotFillable" | "InvalidDeadline" | "OrderCancelled" => {
+                    // These are permanent failures, mark as done
+                    info!("{} - Permanent failure detected, marking as done", order_hash);
+                    self.mark_as_done(order_hash);
+                }
+                "InsufficientETH" | "InsufficientToken" | "NativeTransferFailed" => {
+                    // These are temporary failures, add back to open_orders for retry
+                    if let Some(order_data) = self.get_order_data_from_hash(order_hash) {
+                        if !self.open_orders.contains_key(order_hash) {
+                            self.open_orders.insert(order_hash.to_string(), order_data);
+                            info!("{} - Added back to open_orders for retry after temporary failure", order_hash);
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown failure reason, be conservative and mark as done
+                    warn!("{} - Unknown failure reason '{}', marking as done", order_hash, failure_reason);
+                    self.mark_as_done(order_hash);
+                }
+            }
+        } else {
+            warn!("{} - Order not found in processing_orders during failure handling", order_hash);
+        }
+    }
+
+    /// Clean up orders that have been processing for too long
+    /// This handles cases where transactions fail silently or get stuck
+    fn cleanup_stale_processing_orders(&mut self) {
+        let current_time = self.last_block_timestamp;
+        let max_processing_time = 60; // 60 seconds max processing time
+        
+        let mut to_remove = Vec::new();
+        
+        for (order_hash, start_time) in self.processing_timestamps.iter() {
+            if current_time - start_time > max_processing_time {
+                to_remove.push(order_hash.clone());
+            }
+        }
+        
+        for order_hash in to_remove.clone() {
+            if self.processing_orders.remove(&order_hash) {
+                self.processing_timestamps.remove(&order_hash);
+                info!("{} - Moved from processing_orders back to open_orders due to timeout", order_hash);
+                
+                // Try to reconstruct order data for retry
+                if let Some(order_data) = self.get_order_data_from_hash(&order_hash) {
+                    if !self.open_orders.contains_key(&order_hash) {
+                        self.open_orders.insert(order_hash.clone(), order_data);
+                    }
+                } else {
+                    warn!("{} - Could not reconstruct order data, marking as done", order_hash);
+                    self.mark_as_done(&order_hash);
+                }
+            }
+        }
+        
+        if !to_remove.is_empty() {
+            info!("Cleaned up {} stale processing orders", to_remove.len());
+        }
+    }
+
+    /// Add order to processing_orders with timestamp tracking
+    fn add_to_processing(&mut self, order_hash: &str) {
+        self.processing_orders.insert(order_hash.to_string());
+        self.processing_timestamps.insert(order_hash.to_string(), self.last_block_timestamp);
+    }
+
+    /// Remove order from processing_orders and clear timestamp
+    fn remove_from_processing(&mut self, order_hash: &str) {
+        self.processing_orders.remove(order_hash);
+        self.processing_timestamps.remove(order_hash);
     }
 }

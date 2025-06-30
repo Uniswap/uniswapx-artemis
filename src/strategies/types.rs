@@ -12,6 +12,7 @@ use super::priority_strategy::ExecutionMetadata;
 pub enum Event {
     NewBlock(NewBlock),
     UniswapXOrder(Box<UniswapXOrder>),
+    UniswapXCancelledOrder(Box<UniswapXOrder>),
     UniswapXRoute(Box<RoutedOrder>),
 }
 

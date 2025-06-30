@@ -11,6 +11,9 @@ use std::str::FromStr;
 use std::string::ToString;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
+use std::sync::Arc;
+
+use crate::strategies::types::Event;
 
 static POLL_INTERVAL_MS: u64 = 5000; // 5 seconds
 
@@ -83,13 +86,31 @@ pub struct UniswapXOrderResponse {
     pub orders: Vec<UniswapXOrder>,
 }
 
+/// A new cancelled order event, containing the internal order.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UniswapXCancelledOrderResponse {
+    pub orders: Vec<UniswapXOrder>,
+}
+
 /// A collector that listens for new orders on UniswapX, and generates a stream of
 /// [events](UniswapXOrder) which contain the order.
 #[derive(Default)]
 pub struct UniswapXOrderCollector {
-    pub client: Client,
+    pub client: Arc<Client>,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
+    pub chain_id: u64,
+    pub order_type: OrderType,
+    pub execute_address: String,
+}
+
+/// A collector that listens for cancelled orders on UniswapX, and generates a stream of
+/// [events](UniswapXCancelledOrder) which contain the cancelled order.
+#[derive(Default)]
+pub struct UniswapXOrderCancelledCollector {
+    pub client: Arc<Client>,
+    pub base_url: String,
+    pub api_key: Option<String>,
     pub chain_id: u64,
     pub order_type: OrderType,
     pub execute_address: String,
@@ -103,9 +124,27 @@ impl UniswapXOrderCollector {
         api_key: Option<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: Arc::new(Client::new()),
             base_url: get_uniswapx_api_url(),
-            api_key: api_key.unwrap_or_else(|| "".to_string()),
+            api_key,
+            chain_id,
+            order_type,
+            execute_address,
+        }
+    }
+}
+
+impl UniswapXOrderCancelledCollector {
+    pub fn new(
+        chain_id: u64,
+        order_type: OrderType,
+        execute_address: String,
+        api_key: Option<String>,
+    ) -> Self {
+        Self {
+            client: Arc::new(Client::new()),
+            base_url: get_uniswapx_api_url(),
+            api_key,
             chain_id,
             order_type,
             execute_address,
@@ -117,8 +156,8 @@ impl UniswapXOrderCollector {
 /// [UniswapXOrderCollector](UniswapXOrderCollector).
 // TODO: implement order deduplication
 #[async_trait]
-impl Collector<UniswapXOrder> for UniswapXOrderCollector {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, UniswapXOrder>> {
+impl Collector<Event> for UniswapXOrderCollector {
+    async fn get_event_stream(&self) -> Result<CollectorStream<'_, Event>> {
         let url = format!(
             "{}/orders?orderStatus=open&chainId={}&orderType={}&limit=500&executeAddress={}",
             self.base_url, self.chain_id, self.order_type, self.execute_address,
@@ -144,19 +183,19 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 #[allow(unused_assignments)]
                 let mut last_error = None;
                 loop {
-                    match client
-                        .get(url.clone())
-                        .header("x-api-key", api_key.clone())
-                        .send()
-                        .await
-                    {
+                    let mut request = client.get(url.clone());
+                    if let Some(key) = &api_key {
+                        request = request.header("x-api-key", key);
+                    }
+                    
+                    match request.send().await {
                         Ok(resp) => match resp.json::<UniswapXOrderResponse>().await {
                             Ok(data) => {
                                 tracing::debug!(
                                     num_orders = data.orders.len(),
                                     "Successfully fetched orders from UniswapX API"
                                 );
-                                return Ok(data.orders);
+                                return Ok(data.orders.into_iter().map(|o| Event::UniswapXOrder(Box::new(o))).collect());
                             }
                             Err(e) => {
                                 last_error = Some(e.to_string());
@@ -183,7 +222,7 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             }
         })
         .flat_map(
-            |values_result: Result<Vec<UniswapXOrder>>| match values_result {
+            |values_result: Result<Vec<Event>>| match values_result {
                 Ok(values) => stream::iter(values.into_iter().map(Ok)).left_stream(),
                 Err(e) => {
                     tracing::warn!(error = %e, "Error in order stream, skipping batch");
@@ -200,7 +239,96 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 }
             }
         });
+        Ok(Box::pin(stream))
+    }
+}
 
+/// Implementation of the [Collector](Collector) trait for the
+/// [UniswapXOrderCancelledCollector](UniswapXOrderCancelledCollector).
+#[async_trait]
+impl Collector<Event> for UniswapXOrderCancelledCollector {
+    async fn get_event_stream(&self) -> Result<CollectorStream<'_, Event>> {
+        let url = format!(
+            "{}/orders?orderStatus=cancelled&chainId={}&orderType={}&limit=500",
+            self.base_url, self.chain_id, self.order_type,
+        );
+
+        tracing::info!(
+            chain_id = self.chain_id,
+            order_type = %self.order_type,
+            "Starting UniswapX cancelled order collector stream"
+        );
+
+        // stream that polls the UniswapX API for cancelled orders
+        let stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(
+            POLL_INTERVAL_MS,
+        )))
+        .then(move |_| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let api_key = self.api_key.clone();
+            async move {
+                tracing::debug!("Polling UniswapX API for cancelled orders");
+
+                #[allow(unused_assignments)]
+                let mut last_error = None;
+                loop {
+                    let mut request = client.get(url.clone());
+                    if let Some(key) = &api_key {
+                        request = request.header("x-api-key", key);
+                    }
+                    
+                    match request.send().await {
+                        Ok(resp) => match resp.json::<UniswapXCancelledOrderResponse>().await {
+                            Ok(data) => {
+                                tracing::debug!(
+                                    num_cancelled_orders = data.orders.len(),
+                                    "Successfully fetched cancelled orders from UniswapX API"
+                                );
+                                return Ok(data.orders.into_iter().map(|o| Event::UniswapXCancelledOrder(Box::new(o))).collect());
+                            }
+                            Err(e) => {
+                                last_error = Some(e.to_string());
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to parse UniswapX cancelled order API response, retrying..."
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            last_error = Some(e.to_string());
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to fetch cancelled orders from UniswapX API, retrying..."
+                            );
+                        }
+                    }
+
+                    if let Some(err) = last_error {
+                        tracing::warn!(error = %err, "Error in cancelled order stream, retrying...");
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    }
+                }
+            }
+        })
+        .flat_map(
+            |values_result: Result<Vec<Event>>| match values_result {
+                Ok(values) => stream::iter(values.into_iter().map(Ok)).left_stream(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Error in cancelled order stream, skipping batch");
+                    stream::once(async { Err(e) }).right_stream()
+                }
+            },
+        )
+        .filter_map(|result| async {
+            match result {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    tracing::error!(error = %e, "Error processing cancelled order, skipping");
+                    None
+                }
+            }
+        });
         Ok(Box::pin(stream))
     }
 }
@@ -208,6 +336,7 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
 #[cfg(test)]
 mod tests {
     use crate::collectors::uniswapx_order_collector::UniswapXOrderCollector;
+    use crate::strategies::types::Event;
     use alloy::hex;
     use artemis_core::types::Collector;
     use futures::StreamExt;
@@ -233,12 +362,11 @@ mod tests {
             .create_async()
             .await;
         let res = UniswapXOrderCollector {
-            client: reqwest::Client::new(),
+            client: std::sync::Arc::new(reqwest::Client::new()),
             base_url: url.clone(),
-            api_key: "test-key".to_string(),
+            api_key: Some("test-key".to_string()),
             chain_id: 1,
             order_type: order_type,
-            // Inconsequential query parameter because we mock the order service response
             execute_address: "0x0000000000000000000000000000000000000000".to_string(),
         };
 
@@ -255,34 +383,34 @@ mod tests {
         let stream = collector.get_event_stream().await.unwrap();
         let (first_order, stream) = stream.into_future().await;
         assert!(first_order.is_some());
-        assert_eq!(
-            first_order.unwrap().order_hash,
-            "0x3097f9cf452520c6e8f598f0765a7a19249a7355223664cacf9a86b7c5a46a4a"
-        );
+        if let Event::UniswapXOrder(order) = first_order.unwrap() {
+            assert_eq!(order.order_hash, "0x3097f9cf452520c6e8f598f0765a7a19249a7355223664cacf9a86b7c5a46a4a");
+        }
 
         let (second_order, _) = stream.into_future().await;
         assert!(second_order.is_some());
-        assert_eq!(
-            second_order.unwrap().order_hash,
-            "0x0ea53d4ce1524dda9d667e6ba2e0bf3e630d72ebc8946f1528e4a693f2b8b2e9"
-        );
+        if let Event::UniswapXOrder(order) = second_order.unwrap() {
+            assert_eq!(order.order_hash, "0x0ea53d4ce1524dda9d667e6ba2e0bf3e630d72ebc8946f1528e4a693f2b8b2e9");
+        }
         mock.assert_async().await;
     }
 
     #[tokio::test]
     async fn decodes_v2_order() {
         let response = r#"
-{"orders":[{"type":"Dutch_V2","orderStatus":"open","signature":"0x6eb32e7912d333e9c1ab162db02ed1656cdc8fbea2e21e70cd3634e8a3bd85d0582b46cacb584412ef3e035837b005b70f67897969426f9795128ea52de3a8cf1b","encodedOrder":"0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000001000000000000000000000000004449cd34d1eb1fedcf02a1be3834ffde8e6a61800000000000000000000000006982508145454ce325ddbe47a25d4ec3d23119330000000000000000000000000000000000000000000422ca8b0a00a4250000000000000000000000000000000000000000000000000422ca8b0a00a42500000000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000000000000000000000000000000000000042000000000000000000000000000000011f84b9aa48e5f8aa8b9897600006289be000000000000000000000000c9838bbf85ad068136e8da07021e9e131201901904683298fe8b71446644eba514e387688690bde85b7bcaf8de44455a6aaf7a3000000000000000000000000000000000000000000000000000000000669adac5000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003c330a127f1ec70000000000000000000000000000000000000000000000000034be9ca1484989000000000000000000000000c9838bbf85ad068136e8da07021e9e131201901900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000269fc8de5047000000000000000000000000000000000000000000000000000021d754744fbe000000000000000000000000000000fee13a103a10d593b9ae06b3e05f2e7e1c00000000000000000000000000000000000000000000000000000000669ad9b600000000000000000000000000000000000000000000000000000000669ad9f20000000000000000000000006f1cdbbb4d53d226cf4b917bf768b94acbab61680000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000003c64146542c1fd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041d90e87f6f9e84487bfbb5170e856a332769359664c72f90250ee8917baf3a5920e87d331fcf97456e5d4d88761c552a9115569861aa96120b56d882339bbaac91c00000000000000000000000000000000000000000000000000000000000000","chainId":1,"nonce":"1993352701105935839386570705396248068916924096291549856616269381900329515568","orderHash":"0x382f612930c2121ed91fcdc00972f76b4adbef8d111830e1d135ac944a144876","swapper":"0xC9838Bbf85Ad068136E8DA07021E9e1312019019","input":{"token":"0x6982508145454Ce325dDbE47a25d4ec3d2311933","startAmount":"5000000000000000000000000","endAmount":"5000000000000000000000000"},"outputs":[{"token":"0x0000000000000000000000000000000000000000","startAmount":"16944616955649735","endAmount":"14846278718998921","recipient":"0xC9838Bbf85Ad068136E8DA07021E9e1312019019"},{"token":"0x0000000000000000000000000000000000000000","startAmount":"42467711668295","endAmount":"37208718593982","recipient":"0x000000fee13a103A10D593b9AE06b3e05F2E7E1c"}],"cosignerData":{"decayStartTime":1721424310,"decayEndTime":1721424370,"exclusiveFiller":"0x6F1cDbBb4d53d226CF4B917bF768B94acbAB6168","inputOverride":"0","outputOverrides":["16998537363636733","0"]},"cosignature":"0xd90e87f6f9e84487bfbb5170e856a332769359664c72f90250ee8917baf3a5920e87d331fcf97456e5d4d88761c552a9115569861aa96120b56d882339bbaac91c","quoteId":"221f421a-455d-4358-8376-6b4fb0ffb0f1","requestId":"775eea31-3173-4f1c-b7d2-bcd6fbcf2301","createdAt":1721424286}]}        "#;
+{"orders":[{"type":"Dutch_V2","orderStatus":"open","signature":"0x6eb32e7912d333e9c1ab162db02ed1656cdc8fbea2e21e70cd3634e8a3bd85d0582b46cacb584412ef3e035837b005b70f67897969426f9795128ea52de3a8cf1b","encodedOrder":"0x000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000001000000000000000000000000004449cd34d1eb1fedcf02a1be3834ffde8e6a61800000000000000000000000006982508145454ce325ddbe47a25d4ec3d23119330000000000000000000000000000000000000000000422ca8b0a00a4250000000000000000000000000000000000000000000000000422ca8b0a00a42500000000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000000000000000000000000000000000000042000000000000000000000000000000011f84b9aa48e5f8aa8b9897600006289be000000000000000000000000c9838bbf85ad068136e8da07021e9e131201901904683298fe8b71446644eba514e387688690bde85b7bcaf8de44455a6aaf7a3000000000000000000000000000000000000000000000000000000000669adac5000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003c330a127f1ec70000000000000000000000000000000000000000000000000034be9ca1484989000000000000000000000000c9838bbf85ad068136e8da07021e9e131201901900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000269fc8de5047000000000000000000000000000000000000000000000000000021d754744fbe000000000000000000000000000000fee13a103a10d593b9ae06b3e05f2e7e1c00000000000000000000000000000000000000000000000000000000669ad9b600000000000000000000000000000000000000000000000000000000669ad9f20000000000000000000000006f1cdbbb4d53d226cf4b917bf768b94acbab61680000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000003c64146542c1fd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041d90e87f6f9e84487bfbb5170e856a332769359664c72f90250ee8917baf3a5920e87d331fcf97456e5d4d88761c552a9115569861aa96120b56d882339bbaac91c00000000000000000000000000000000000000000000000000000000000000","chainId":1,"nonce":"1993352701105935839386570705396248068916924096291549856616269381900329515568","orderHash":"0x382f612930c2121ed91fcdc00972f76b4adbef8d111830e1d135ac944a144876","swapper":"0xC9838Bbf85Ad068136E8DA07021E9e1312019019","input":{"token":"0x6982508145454Ce325dDbE47a25d4ec3d2311933","startAmount":"5000000000000000000000000","endAmount":"5000000000000000000000000"},"outputs":[{"token":"0x0000000000000000000000000000000000000000","startAmount":"16944616955649735","endAmount":"14846278718998921","recipient":"0xC9838Bbf85Ad068136E8DA07021E9e1312019019"},{"token":"0x0000000000000000000000000000000000000000","startAmount":"42467711668295","endAmount":"37208718593982","recipient":"0x000000fee13a103A10D593b9AE06b3e05F2E7E1c"}],"cosignerData":{"decayStartTime":1721424310,"decayEndTime":1721424370,"exclusiveFiller":"0x6F1cDbBb4d53d226CF4B917bF768B94acbAB6168","inputOverride":"0","outputOverrides":["16998537363636733","0"]},"cosignature":"0xd90e87f6f9e84487bfbb5170e856a332769359664c72f90250ee8917baf3a5920e87d331fcf97456e5d4d88761c552a9115569861aa96120b56d882339bbaac91c","quoteId":"221f421a-455d-4358-8376-6b4fb0ffb0f1","requestId":"775eea31-3173-4f1c-b7d2-bcd6fbcf2301","createdAt":1721424286}]}        "#;
         let (collector, _server, _) = get_collector(response, OrderType::DutchV2).await;
         // get event stream and parse events
         let stream = collector.get_event_stream().await.unwrap();
         let (first_order, _) = stream.into_future().await;
         assert!(first_order.is_some());
-        assert_eq!(
-            first_order.clone().unwrap().order_hash,
-            "0x382f612930c2121ed91fcdc00972f76b4adbef8d111830e1d135ac944a144876"
-        );
-        let encoded_order = &first_order.unwrap().encoded_order;
+        let order = if let Event::UniswapXOrder(order) = first_order.clone().unwrap() {
+            assert_eq!(order.order_hash, "0x382f612930c2121ed91fcdc00972f76b4adbef8d111830e1d135ac944a144876");
+            order
+        } else {
+            panic!("Expected UniswapXOrder event");
+        };
+        let encoded_order = &order.encoded_order;
         let encoded_order = if encoded_order.starts_with("0x") {
             &encoded_order[2..]
         } else {
@@ -307,11 +435,13 @@ mod tests {
         let stream = collector.get_event_stream().await.unwrap();
         let (first_order, _) = stream.into_future().await;
         assert!(first_order.is_some());
-        assert_eq!(
-            first_order.clone().unwrap().order_hash,
-            "0x8762816789a6bf151878cbae60492834335a6b7c3828a304220648d08092316b"
-        );
-        let encoded_order = &first_order.unwrap().encoded_order;
+        let order = if let Event::UniswapXOrder(order) = first_order.clone().unwrap() {
+            assert_eq!(order.order_hash, "0x8762816789a6bf151878cbae60492834335a6b7c3828a304220648d08092316b");
+            order
+        } else {
+            panic!("Expected UniswapXOrder event");
+        };
+        let encoded_order = &order.encoded_order;
         let encoded_order = if encoded_order.starts_with("0x") {
             &encoded_order[2..]
         } else {

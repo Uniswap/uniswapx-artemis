@@ -15,7 +15,7 @@ use artemis_core::engine::Engine;
 use artemis_core::types::{CollectorMap, ExecutorMap};
 use collectors::uniswapx_order_collector::OrderType;
 use collectors::{
-    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
+    block_collector::BlockCollector, uniswapx_order_collector::{UniswapXOrderCollector, UniswapXOrderCancelledCollector},
     uniswapx_route_collector::UniswapXRouteCollector,
 };
 use executors::dutch_executor::DutchExecutor;
@@ -246,12 +246,17 @@ async fn main() -> Result<()> {
         chain_id,
         args.order_type.clone(),
         args.executor_address.clone(),
-        args.uniswapx_api_key,
+        args.uniswapx_api_key.clone(),
     ));
-    let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
-        Event::UniswapXOrder(Box::new(e))
-    });
-    engine.add_collector(Box::new(uniswapx_order_collector));
+    engine.add_collector(uniswapx_order_collector);
+
+    let uniswapx_cancelled_order_collector = Box::new(UniswapXOrderCancelledCollector::new(
+        chain_id,
+        args.order_type.clone(),
+        args.executor_address.clone(),
+        args.uniswapx_api_key.clone(),
+    ));
+    engine.add_collector(uniswapx_cancelled_order_collector);
 
     let cloudwatch_client = if args.cloudwatch_metrics {
         let config = aws_config::load_from_env().await;

@@ -118,6 +118,7 @@ impl Strategy<Event, Action> for UniswapXDutchV3Fill {
             Event::UniswapXOrder(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
             Event::UniswapXRoute(route) => self.process_new_route(&route).await,
+            Event::UniswapXCancelledOrder(_) => vec![],
         }
     }
 }
