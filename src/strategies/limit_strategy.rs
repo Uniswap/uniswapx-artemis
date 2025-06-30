@@ -154,10 +154,15 @@ impl LimitOrderFill {
     // Process cancelled orders as they come in.
     async fn process_cancelled_order_event(&mut self, event: &UniswapXOrder) -> Vec<Action> {
         info!("Processing cancelled order: {}", event.order_hash);
-        
-        // Immediately remove the cancelled order from all states
-        self.handle_order_failure(&event.order_hash, "OrderCancelled");
-        
+
+        // remove from open orders and processing orders
+        if self.open_orders.contains_key(&event.order_hash) {
+            self.open_orders.remove(&event.order_hash);
+        }
+        if self.processing_orders.contains(&event.order_hash) {
+            self.remove_from_processing(&event.order_hash);
+        }
+
         vec![]
     }
 
@@ -497,43 +502,6 @@ impl LimitOrderFill {
         }
         
         None
-    }
-
-    /// Handle specific order failure (e.g., cancelled order, insufficient funds)
-    /// This method can be called when we know specific orders failed
-    pub fn handle_order_failure(&mut self, order_hash: &str, failure_reason: &str) {
-        info!("{} - Handling order failure: {}", order_hash, failure_reason);
-        
-        // Remove from processing_orders
-        if self.processing_orders.contains(order_hash) {
-            self.remove_from_processing(order_hash);
-            info!("{} - Removed from processing_orders due to failure", order_hash);
-            
-            // Determine if order should be retried or marked as done based on failure reason
-            match failure_reason {
-                "OrderAlreadyFilled" | "OrderNotFillable" | "InvalidDeadline" | "OrderCancelled" => {
-                    // These are permanent failures, mark as done
-                    info!("{} - Permanent failure detected, marking as done", order_hash);
-                    self.mark_as_done(order_hash);
-                }
-                "InsufficientETH" | "InsufficientToken" | "NativeTransferFailed" => {
-                    // These are temporary failures, add back to open_orders for retry
-                    if let Some(order_data) = self.get_order_data_from_hash(order_hash) {
-                        if !self.open_orders.contains_key(order_hash) {
-                            self.open_orders.insert(order_hash.to_string(), order_data);
-                            info!("{} - Added back to open_orders for retry after temporary failure", order_hash);
-                        }
-                    }
-                }
-                _ => {
-                    // Unknown failure reason, be conservative and mark as done
-                    warn!("{} - Unknown failure reason '{}', marking as done", order_hash, failure_reason);
-                    self.mark_as_done(order_hash);
-                }
-            }
-        } else {
-            warn!("{} - Order not found in processing_orders during failure handling", order_hash);
-        }
     }
 
     /// Clean up orders that have been processing for too long
