@@ -17,14 +17,31 @@ fn current_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+// See UniswapX repository for original definitions:
+//
+// https://github.com/Uniswap/UniswapX/
 sol! {
     #[derive(Debug)]
     struct OrderInfo {
+        // The address of the reactor that this order is targeting
+        // Note that this must be included in every order so the swapper
+        // signature commits to the specific reactor that they trust to fill their order properly
         address reactor;
+
+        // The address of the user which created the order
+        // Note that this must be included so that order hashes are unique by swapper
         address swapper;
+
+        // The nonce of the order, allowing for signature replay protection and cancellation
         uint256 nonce;
+
+        // The timestamp after which this order is no longer valid
         uint256 deadline;
+
+        // Custom validation contract
         address additionalValidationContract;
+
+        // Encoded validation params for additionalValidationContract
         bytes additionalValidationData;
     }
 
@@ -67,6 +84,7 @@ sol! {
     struct PriorityInput {
         address token;
         uint256 amount;
+        // the least input amount to be received per wei of priority fee
         uint256 mpsPerPriorityFeeWei;
     }
 
@@ -74,24 +92,34 @@ sol! {
     struct PriorityOutput {
         address token;
         uint256 amount;
+        // the extra amount of output to be paid per wei of priority fee
         uint256 mpsPerPriorityFeeWei;
         address recipient;
     }
 
     #[derive(Debug)]
     struct PriorityCosignerData {
+        // the block at which the order can be executed (overrides auctionStartBlock)
         uint256 auctionTargetBlock;
     }
 
     #[derive(Debug)]
     struct PriorityOrder {
+        // generic order information
         OrderInfo info;
+        // address which may cosign the order
         address cosigner;
+        // block at which the order can be executed
         uint256 auctionStartBlock;
+        // baseline priority fee for the order, above which additional taxes are applied
         uint256 baselinePriorityFeeWei;
+        // tokens that the swapper will provide when settling the order
         PriorityInput input;
+        // tokens that must be received to satisfy the order
         PriorityOutput[] outputs;
+        // signed over by the cosigner
         PriorityCosignerData cosignerData;
+        // signature from the cosigner over (orderHash || cosignerData)
         bytes cosignature;
     }
 
@@ -129,7 +157,7 @@ sol! {
         uint256 maxAmount;
         uint256 adjustmentPerGweiBaseFee;
     }
-    
+
     #[derive(Debug)]
     struct V3DutchOutput {
         address token;
@@ -141,8 +169,18 @@ sol! {
     }
 }
 
+/// Priority fees are expressed in milli-bips (one thousandth of a basis point)
+///
+/// 1 basis point (bp) = 0.01% = 0.0001
+/// 1 milli-bip = 0.0001 / 1000 = 1e-7
+///
+/// MPS represents scaling factor (1 / 1e-7). Multiplying by it converts a value
+/// to milli-bips.
 pub const MPS: u64 = 1e7 as u64;
+
+/// 100% (10k basis points)
 pub const BPS: U256 = Uint::from_limbs([10000, 0, 0, 0]);
+
 const PACKED_UINT16_ARRAY_LENGTH: usize = 256 / 16;
 
 #[derive(Debug, Clone)]
@@ -172,24 +210,32 @@ impl Order {
     pub fn trade_type(&self) -> TradeType {
         match self {
             Order::V2DutchOrder(order) => {
-                if order.baseOutputs.iter().any(|o| o.startAmount == o.endAmount) {
+                if order
+                    .baseOutputs
+                    .iter()
+                    .any(|o| o.startAmount == o.endAmount)
+                {
                     TradeType::ExactOut
                 } else {
                     TradeType::ExactIn
                 }
             }
             Order::PriorityOrder(order) => {
-                if order.outputs.iter().any(|o| o.mpsPerPriorityFeeWei == U256::from(0)) {
+                if order
+                    .outputs
+                    .iter()
+                    .any(|o| o.mpsPerPriorityFeeWei == U256::from(0))
+                {
                     TradeType::ExactOut
                 } else {
                     TradeType::ExactIn
                 }
             }
             Order::V3DutchOrder(order) => {
-                if order.baseOutputs.iter().any(
-                    |o| o.curve.relativeAmounts.len() == 0 ||
-                    o.curve.relativeAmounts.iter().all(|&x| x.eq(&I256::ZERO))
-                ) {
+                if order.baseOutputs.iter().any(|o| {
+                    o.curve.relativeAmounts.is_empty()
+                        || o.curve.relativeAmounts.iter().all(|&x| x.eq(&I256::ZERO))
+                }) {
                     TradeType::ExactOut
                 } else {
                     TradeType::ExactIn
@@ -273,10 +319,20 @@ impl V2DutchOrder {
                 );
 
                 // add exclusivity override to amount
-                if self.cosignerData.decayStartTime.gt(&timestamp) && !self.cosignerData.exclusiveFiller.is_zero() {
-                    let exclusivity = self.cosignerData.exclusivityOverrideBps.checked_add(BPS).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
-                    let exclusivity = exclusivity.checked_mul(amount).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
-                    amount = exclusivity.checked_div(BPS).ok_or(anyhow::Error::msg("Division by zero in exclusivity calculation"))?;
+                if self.cosignerData.decayStartTime.gt(&timestamp)
+                    && !self.cosignerData.exclusiveFiller.is_zero()
+                {
+                    let exclusivity = self
+                        .cosignerData
+                        .exclusivityOverrideBps
+                        .checked_add(BPS)
+                        .ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
+                    let exclusivity = exclusivity
+                        .checked_mul(amount)
+                        .ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
+                    amount = exclusivity.checked_div(BPS).ok_or(anyhow::Error::msg(
+                        "Division by zero in exclusivity calculation",
+                    ))?;
                 };
 
                 Ok(ResolvedOutput {
@@ -288,17 +344,35 @@ impl V2DutchOrder {
             .collect();
 
         match outputs {
-            Ok(resolved_outputs) => OrderResolution::Resolved(ResolvedOrder { input, outputs: resolved_outputs }),
-            Err(_) => OrderResolution::Invalid
+            Ok(resolved_outputs) => OrderResolution::Resolved(ResolvedOrder {
+                input,
+                outputs: resolved_outputs,
+            }),
+            Err(_) => OrderResolution::Invalid,
         }
     }
 }
 
-// Estimates the target block timestamp based on the current block timestamp and average block time
-pub fn projected_target_block_ms(current_block: u64, target_block: u64, block_timestamp: u64, block_time_ms: u64) -> U256 {
+/// Estimates the target block timestamp in milliseconds based on the current
+/// block timestamp and average block time
+///
+/// * `block_timestamp` - Current block timestamp in seconds
+/// * `block_time_ms` - Chain-specific average block time in milliseconds (see
+///                     [get_block_time_ms]).
+pub fn projected_target_block_ms(
+    current_block: u64,
+    target_block: u64,
+    block_timestamp: u64,
+    block_time_ms: u64,
+) -> U256 {
+    assert!(target_block > current_block);
+
     let blocks_until_target = U256::from(target_block).saturating_sub(U256::from(current_block));
     let time_until_target_ms = blocks_until_target.saturating_mul(U256::from(block_time_ms));
-    U256::from(block_timestamp).saturating_mul(U256::from(1000)).saturating_add(time_until_target_ms)
+
+    U256::from(block_timestamp)
+        .saturating_mul(U256::from(1000))
+        .saturating_add(time_until_target_ms)
 }
 
 impl PriorityOrder {
@@ -310,7 +384,27 @@ impl PriorityOrder {
         PriorityOrder::abi_encode(self)
     }
 
-    pub fn resolve(&self, block_number: u64, block_timestamp: u64, block_time_ms: u64, priority_fee: U256, min_block_percentage_buffer: u64) -> OrderResolution {
+    /// Determines fill status based on current time and the estimated target
+    /// block time, and calculates inputs/outputs given the priority fee.
+    ///
+    /// * `block_timestamp` - Current block timestamp in seconds
+    /// * `priority_fee` - Priority fee in wei, may be 0
+    /// * `min_block_percentage_buffer` - Percentage of block time that must
+    ///    elapse before the order becomes fillable. Expressed as value [0, 100].
+    ///
+    /// Returns:
+    /// - `Expired` if completing the order is not possible before deadline
+    /// - `NotFillableYet` if the target block is too far in the future as per
+    ///    min_block_percentage_buffer
+    /// - `ResolvedOrder` otherwise
+    pub fn resolve(
+        &self,
+        block_number: u64,
+        block_timestamp: u64,
+        block_time_ms: u64,
+        priority_fee: U256,
+        min_block_percentage_buffer: u64,
+    ) -> OrderResolution {
         let block_time = block_time_ms / 1000;
         let next_block_timestamp = U256::from(block_timestamp) + U256::from(block_time);
 
@@ -321,21 +415,25 @@ impl PriorityOrder {
             .map(|output| output.scale(priority_fee))
             .collect();
 
-        let min_start_block = std::cmp::min(self.cosignerData.auctionTargetBlock, self.auctionStartBlock);
+        let min_start_block = self
+            .cosignerData
+            .auctionTargetBlock
+            .min(self.auctionStartBlock);
 
         let current_block = U256::from(block_number);
         if self.info.deadline.lt(&next_block_timestamp) || current_block >= min_start_block {
             return OrderResolution::Expired;
         };
-        
+
         // If current timestamp is > BLOCK_TIME away from target
         // then not yet fillable
         let target_block_ms = projected_target_block_ms(
             block_number,
             min_start_block.try_into().unwrap(),
             block_timestamp,
-            block_time_ms
+            block_time_ms,
         );
+
         let time_buffer_ms = block_time_ms * min_block_percentage_buffer / 100;
         if U256::from(current_timestamp_ms() + time_buffer_ms).lt(&target_block_ms) {
             return OrderResolution::NotFillableYet(ResolvedOrder { input, outputs });
@@ -345,9 +443,19 @@ impl PriorityOrder {
     }
 }
 
+/// See https://github.com/Uniswap/UniswapX/blob/3a5bcb6ee628f3336ac2510163eac13ef6dbb03e/src/lib/PriorityFeeLib.sol#L22
 impl PriorityInput {
+    /// scaled_amount = amount * (1 + priority_fee * mpsPerPriorityFeeWei / MPS)
+    /// ->
+    /// scaled_amount = amount * (MPS + priority_fee * mpsPerPriorityFeeWei) / MPS
     pub fn scale(&self, priority_fee: U256) -> ResolvedInput {
-        let amount = self.amount.wrapping_mul(U256::from(MPS).wrapping_add(priority_fee.wrapping_mul(self.mpsPerPriorityFeeWei))).wrapping_div(U256::from(MPS));
+        let amount = self
+            .amount
+            .wrapping_mul(
+                U256::from(MPS).wrapping_add(priority_fee.wrapping_mul(self.mpsPerPriorityFeeWei)),
+            )
+            .wrapping_div(U256::from(MPS));
+
         ResolvedInput {
             token: self.token.to_string(),
             amount,
@@ -355,9 +463,20 @@ impl PriorityInput {
     }
 }
 
+/// See https://github.com/Uniswap/UniswapX/blob/3a5bcb6ee628f3336ac2510163eac13ef6dbb03e/src/lib/PriorityFeeLib.sol#L41
 impl PriorityOutput {
+    /// scaled_amount = amount * (1 - priority_fee * mpsPerPriorityFeeWei / MPS)
+    /// ->
+    /// scaled_amount = amount * (MPS - priority_fee * mpsPerPriorityFeeWei) / MPS
     pub fn scale(&self, priority_fee: U256) -> ResolvedOutput {
-        let amount = self.amount.wrapping_mul(U256::from(MPS).saturating_sub(priority_fee.wrapping_mul(self.mpsPerPriorityFeeWei))).wrapping_div(U256::from(MPS));
+        let amount = self
+            .amount
+            .wrapping_mul(
+                U256::from(MPS)
+                    .saturating_sub(priority_fee.wrapping_mul(self.mpsPerPriorityFeeWei)),
+            )
+            .wrapping_div(U256::from(MPS));
+
         ResolvedOutput {
             token: self.token.to_string(),
             amount,
@@ -391,7 +510,7 @@ impl V3DutchOrder {
                 U256::from(block_number),
                 U256::from(0),
                 self.baseInput.maxAmount,
-                NonlinearDutchDecay::v3_linear_input_decay
+                NonlinearDutchDecay::v3_linear_input_decay,
             ) {
                 Ok(amount) => amount,
                 Err(_) => return OrderResolution::Invalid,
@@ -408,14 +527,27 @@ impl V3DutchOrder {
                     U256::from(block_number),
                     output.minAmount,
                     U256::MAX,
-                    NonlinearDutchDecay::v3_linear_output_decay
+                    NonlinearDutchDecay::v3_linear_output_decay,
                 )?;
-                
-                // add exclusivity override to amount if before decay start block
-                if self.cosignerData.decayStartBlock.gt(&U256::from(block_number)) && !self.cosignerData.exclusiveFiller.is_zero() {
-                    let exclusivity = self.cosignerData.exclusivityOverrideBps.checked_add(BPS).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
-                    let exclusivity = exclusivity.checked_mul(amount).ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
-                    amount = exclusivity.checked_div(BPS).ok_or(anyhow::Error::msg("Division by zero in exclusivity calculation"))?;
+
+                // add exclusivity override to amount before decay start block
+                if self
+                    .cosignerData
+                    .decayStartBlock
+                    .gt(&U256::from(block_number))
+                    && !self.cosignerData.exclusiveFiller.is_zero()
+                {
+                    let exclusivity = self
+                        .cosignerData
+                        .exclusivityOverrideBps
+                        .checked_add(BPS)
+                        .ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
+                    let exclusivity = exclusivity
+                        .checked_mul(amount)
+                        .ok_or(anyhow::Error::msg("Overflow in exclusivity calculation"))?;
+                    amount = exclusivity.checked_div(BPS).ok_or(anyhow::Error::msg(
+                        "Division by zero in exclusivity calculation",
+                    ))?;
                 };
 
                 Ok(ResolvedOutput {
@@ -427,12 +559,19 @@ impl V3DutchOrder {
             .collect();
 
         match outputs {
-            Ok(resolved_outputs) => OrderResolution::Resolved(ResolvedOrder { input, outputs: resolved_outputs }),
+            Ok(resolved_outputs) => OrderResolution::Resolved(ResolvedOrder {
+                input,
+                outputs: resolved_outputs,
+            }),
             Err(_) => OrderResolution::Invalid,
         }
     }
 }
 
+/// Computes a linear decay between start_amount and end_amount over the
+/// interval [start_time, end_time].
+///
+/// Returns the interpolated amount at the given at_time.
 fn resolve_decay(
     at_time: U256,
     start_time: U256,
@@ -479,7 +618,6 @@ fn resolve_decay(
 }
 
 impl NonlinearDutchDecay {
-
     pub fn decay(
         &self,
         start_amount: U256,
@@ -487,7 +625,7 @@ impl NonlinearDutchDecay {
         block_numberish: U256,
         min_amount: U256,
         max_amount: U256,
-        decay_func: fn(U256, U256, U256, I256, I256) -> Result<I256>
+        decay_func: fn(U256, U256, U256, I256, I256) -> Result<I256>,
     ) -> Result<U256> {
         // Check for invalid decay curve
         if self.relativeAmounts.len() > PACKED_UINT16_ARRAY_LENGTH {
@@ -500,15 +638,14 @@ impl NonlinearDutchDecay {
         }
 
         // Cap block_delta to u16::MAX to prevent overflow
-        let block_delta: u16 = u16::try_from(
-            (block_numberish - decay_start_block).min(U256::from(u16::MAX))
-        )?;
+        let block_delta: u16 =
+            u16::try_from((block_numberish - decay_start_block).min(U256::from(u16::MAX)))?;
 
-        let (start_point, end_point, rel_start_amount, rel_end_amount) = 
+        let (start_point, end_point, rel_start_amount, rel_end_amount) =
             self.locate_curve_position(block_delta)?;
 
         // Calculate decay of only the relative amounts
-        let curve_delta = (decay_func)(
+        let curve_delta = decay_func(
             U256::from(start_point),
             U256::from(end_point),
             U256::from(block_delta),
@@ -549,27 +686,30 @@ impl NonlinearDutchDecay {
         if current_point >= end_point {
             return Ok(end_amount);
         }
+
         let elapsed = current_point.saturating_sub(start_point);
         let duration = end_point.saturating_sub(start_point);
-        let delta: I256;
 
         // Because start_amount + delta is subtracted from the original amount,
         // we want to maximize start_amount + delta to favor the swapper
-        if end_amount < start_amount {
-            delta = -(I256::try_from(
-                U256::try_from(start_amount.checked_sub(end_amount)
-                    .ok_or_else(|| anyhow::anyhow!("Underflow in start_amount - end_amount"))?)?
+        let delta =
+            if end_amount < start_amount {
+                -(I256::try_from(
+                    U256::try_from(start_amount.checked_sub(end_amount).ok_or_else(|| {
+                        anyhow::anyhow!("Underflow in start_amount - end_amount")
+                    })?)?
                     .mul_div_down(elapsed, duration)
-                    .map_err(|e| anyhow::anyhow!("MulDivDown error: {}", e))?
-            )?);
-        } else {
-            delta = I256::try_from(
-                U256::try_from(end_amount.checked_sub(start_amount)
-                .ok_or_else(|| anyhow::anyhow!("Underflow in end_amount - start_amount"))?)?
-                .mul_div_up(elapsed, duration)
-                .map_err(|e| anyhow::anyhow!("MulDivUp error: {}", e))?
-            )?;
-        }
+                    .map_err(|e| anyhow::anyhow!("MulDivDown error: {}", e))?,
+                )?)
+            } else {
+                I256::try_from(
+                    U256::try_from(end_amount.checked_sub(start_amount).ok_or_else(|| {
+                        anyhow::anyhow!("Underflow in end_amount - start_amount")
+                    })?)?
+                    .mul_div_up(elapsed, duration)
+                    .map_err(|e| anyhow::anyhow!("MulDivUp error: {}", e))?,
+                )?
+            };
 
         Ok(start_amount.saturating_add(delta))
     }
@@ -597,26 +737,29 @@ impl NonlinearDutchDecay {
         if current_point >= end_point {
             return Ok(end_amount);
         }
+
         let elapsed = current_point.saturating_sub(start_point);
         let duration = end_point.saturating_sub(start_point);
-        let delta: I256;
 
         // For outputs, we want to minimize start_amount + delta to favor the swapper
-        if end_amount < start_amount {
-            delta = -(I256::try_from(
-                U256::try_from(start_amount.checked_sub(end_amount)
-                    .ok_or_else(|| anyhow::anyhow!("Underflow in start_amount - end_amount"))?)?
+        let delta =
+            if end_amount < start_amount {
+                -(I256::try_from(
+                    U256::try_from(start_amount.checked_sub(end_amount).ok_or_else(|| {
+                        anyhow::anyhow!("Underflow in start_amount - end_amount")
+                    })?)?
                     .mul_div_up(elapsed, duration)
-                    .map_err(|e| anyhow::anyhow!("MulDivUp error: {}", e))?
-            )?);
-        } else {
-            delta = I256::try_from(
-                U256::try_from(end_amount.checked_sub(start_amount)
-                .ok_or_else(|| anyhow::anyhow!("Underflow in end_amount - start_amount"))?)?
-                .mul_div_down(elapsed, duration)
-                .map_err(|e| anyhow::anyhow!("MulDivDown error: {}", e))?
-            )?;
-        }
+                    .map_err(|e| anyhow::anyhow!("MulDivUp error: {}", e))?,
+                )?)
+            } else {
+                I256::try_from(
+                    U256::try_from(end_amount.checked_sub(start_amount).ok_or_else(|| {
+                        anyhow::anyhow!("Underflow in end_amount - start_amount")
+                    })?)?
+                    .mul_div_down(elapsed, duration)
+                    .map_err(|e| anyhow::anyhow!("MulDivDown error: {}", e))?,
+                )?
+            };
 
         Ok(start_amount.saturating_add(delta))
     }
@@ -625,43 +768,45 @@ impl NonlinearDutchDecay {
     fn locate_curve_position(&self, current_relative_block: u16) -> Result<(u16, u16, I256, I256)> {
         // Position is before the start of the curve
         if Self::get_element(self.relativeBlocks, 0)? >= current_relative_block {
-            return Ok((0, Self::get_element(self.relativeBlocks, 0)?, I256::ZERO, self.relativeAmounts[0]));
+            return Ok((
+                0,
+                Self::get_element(self.relativeBlocks, 0)?,
+                I256::ZERO,
+                self.relativeAmounts[0],
+            ));
         }
+
         let last_curve_index = self.relativeAmounts.len() - 1;
         for i in 1..=last_curve_index {
             if Self::get_element(self.relativeBlocks, i)? >= current_relative_block {
-                return Ok(
-                    (
-                        Self::get_element(self.relativeBlocks, i - 1)?,
-                        Self::get_element(self.relativeBlocks, i)?,
-                        self.relativeAmounts[i - 1],
-                        self.relativeAmounts[i],
-                    )
-                );
+                return Ok((
+                    Self::get_element(self.relativeBlocks, i - 1)?,
+                    Self::get_element(self.relativeBlocks, i)?,
+                    self.relativeAmounts[i - 1],
+                    self.relativeAmounts[i],
+                ));
             }
         }
 
-        Ok(
-            (
-                Self::get_element(self.relativeBlocks, last_curve_index)?,
-                Self::get_element(self.relativeBlocks, last_curve_index)?,
-                self.relativeAmounts[last_curve_index],
-                self.relativeAmounts[last_curve_index],
-            )
-        )
+        Ok((
+            Self::get_element(self.relativeBlocks, last_curve_index)?,
+            Self::get_element(self.relativeBlocks, last_curve_index)?,
+            self.relativeAmounts[last_curve_index],
+            self.relativeAmounts[last_curve_index],
+        ))
     }
 
     /// Convert a u16 array into a single Uint<256, 4> value
-    /// 
+    ///
     /// This function packs up to 16 u16 values into a single Uint<256, 4>.
     /// Each u16 value occupies 16 bits in the resulting Uint.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `input_array` - A slice of u16 values to be packed
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// * `Result<Uint<256, 4>>` - The packed Uint value or an error
     pub fn to_uint16_array(input_array: &[u16]) -> Result<U256> {
         if input_array.len() > PACKED_UINT16_ARRAY_LENGTH {
@@ -678,13 +823,12 @@ impl NonlinearDutchDecay {
         Ok(packed_data)
     }
 
-    
     /// Retrieve the nth uint16 value from a packed uint256
     fn get_element(packed_data: U256, n: usize) -> Result<u16> {
         if n >= PACKED_UINT16_ARRAY_LENGTH {
             return Err(anyhow::Error::msg("IndexOutOfBounds"));
         }
-        
+
         let shift_amount = n * 16;
         let masked_value = (packed_data >> shift_amount) & U256::from(0xFFFF);
         let result = u16::try_from(masked_value)?;
@@ -692,14 +836,13 @@ impl NonlinearDutchDecay {
     }
 }
 
-// tests
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DECAY_FUNCTIONS: [fn(U256, U256, U256, I256, I256) -> Result<I256>; 2] = [
         NonlinearDutchDecay::v3_linear_input_decay,
-        NonlinearDutchDecay::v3_linear_output_decay
+        NonlinearDutchDecay::v3_linear_output_decay,
     ];
 
     #[test]
@@ -789,13 +932,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_before_start() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -818,7 +956,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
             assert_eq!(result.unwrap(), start_amount);
         }
@@ -827,13 +965,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_at_start() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -856,7 +989,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
 
             assert_eq!(result.unwrap(), U256::from(1000));
@@ -866,13 +999,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_midway() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -895,7 +1023,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
 
             assert_eq!(result.unwrap(), U256::from(100));
@@ -905,13 +1033,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_at_end() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -934,7 +1057,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
 
             assert_eq!(result.unwrap(), U256::from(800));
@@ -944,13 +1067,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_after_end() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -973,22 +1091,17 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
-        assert_eq!(result.unwrap(), U256::from(800));
+            assert_eq!(result.unwrap(), U256::from(800));
         }
     }
 
     #[test]
     fn test_nonlinear_decay_with_min_amount() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -1011,7 +1124,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
 
             assert_eq!(result.unwrap(), min_amount);
@@ -1021,13 +1134,8 @@ mod tests {
     #[test]
     fn test_nonlinear_decay_with_max_amount() {
         let decay = NonlinearDutchDecay {
-            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![
-                100,
-                200,
-                300,
-                400,
-                500,
-            ]).unwrap(),
+            relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200, 300, 400, 500])
+                .unwrap(),
             relativeAmounts: vec![
                 I256::try_from(1000).unwrap(),
                 I256::try_from(800).unwrap(),
@@ -1050,7 +1158,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
             assert_eq!(result.unwrap(), max_amount);
         }
@@ -1060,10 +1168,7 @@ mod tests {
     fn test_nonlinear_decay_start_amount_underflow() {
         let decay = NonlinearDutchDecay {
             relativeBlocks: NonlinearDutchDecay::to_uint16_array(&vec![100, 200]).unwrap(),
-            relativeAmounts: vec![
-                I256::try_from(1000).unwrap(),
-                I256::try_from(800).unwrap(),
-            ],
+            relativeAmounts: vec![I256::try_from(1000).unwrap(), I256::try_from(800).unwrap()],
         };
 
         let start_block = U256::from(1000);
@@ -1079,7 +1184,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
             // Cannot fall below min_amount, even upon underflow
             assert_eq!(result.unwrap(), min_amount);
@@ -1109,7 +1214,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
             // Cannot go above max_amount, even upon overflow
             assert_eq!(result.unwrap(), max_amount);
@@ -1120,8 +1225,8 @@ mod tests {
     fn test_nonlinear_decay_relative_blocks_too_long() {
         // Attempt to create the packed relativeBlocks
         let relative_blocks = NonlinearDutchDecay::to_uint16_array(&vec![
-            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-            1100, 1200, 1300, 1400, 1500, 1600, 1700
+            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600,
+            1700,
         ]);
 
         // Ensure that to_uint16_array returned an error due to excessive length
@@ -1152,7 +1257,7 @@ mod tests {
                 current_block,
                 min_amount,
                 max_amount,
-                *decay_func
+                *decay_func,
             );
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), start_amount);

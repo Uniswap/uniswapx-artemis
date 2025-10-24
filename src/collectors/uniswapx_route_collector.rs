@@ -18,7 +18,7 @@ use reqwest::{Client, StatusCode};
 
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
-    shared::{normalize_erc20eth_to_native, send_metric_with_order_hash, RouteInfo, MethodParameters},
+    shared::{normalize_erc20eth_to_native, send_metric_with_order_hash, MethodParameters, RouteInfo},
 };
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
@@ -120,6 +120,7 @@ pub struct OrderRoute {
     pub quote: String,
     pub quote_gas_adjusted: String,
     pub gas_price_wei: String,
+    /// Specifies how much the same gas usage would cost in quote tokens
     pub gas_use_estimate_quote: String,
     pub gas_use_estimate: String,
     pub route: Vec<Vec<Route>>,
@@ -148,8 +149,8 @@ pub struct RouteResponse {
     pub orders: Vec<Route>,
 }
 
-/// A collector that listens for new orders on UniswapX, and generates a stream of
-/// [events](Route) which contain the order.
+/// A collector that obtains possible Uniswap routes using V2-V4 liquidity for
+/// orders produced by the strategy, and generates a stream of [events](Route).
 pub struct UniswapXRouteCollector {
     pub client: Client,
     pub chain_id: u64,

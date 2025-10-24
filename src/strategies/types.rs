@@ -11,8 +11,8 @@ use super::priority_strategy::ExecutionMetadata;
 #[derive(Debug, Clone)]
 pub enum Event {
     NewBlock(NewBlock),
-    UniswapXOrder(Box<UniswapXOrder>),
-    UniswapXRoute(Box<RoutedOrder>),
+    Order(Box<UniswapXOrder>),
+    RoutedOrder(Box<RoutedOrder>),
 }
 
 #[derive(Debug, Clone)]

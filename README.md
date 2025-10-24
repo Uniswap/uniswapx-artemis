@@ -4,7 +4,7 @@ This is a sample [Artemis](https://github.com/paradigmxyz/artemis) bot that fill
 
 Feel free to fork and modify to run any strategies you wish to fill UniswapX orders!
 
-# Usage
+## Usage
 
 First you must deploy an executor contract that implements the [IReactorCallback](https://github.com/Uniswap/UniswapX/blob/main/src/interfaces/IReactorCallback.sol) interface. This sample currently uses the provided [SwapRouter02Executor](https://github.com/Uniswap/UniswapX/blob/main/src/sample-executors/SwapRouter02Executor.sol).
 
@@ -12,42 +12,96 @@ Then update the address constant in [uniswapx_strategy](./src/strategies/uniswap
 
 Finally, run the bot with the following command:
 
-```
+```shell
 cargo run -- --http <http RPC url> --mevblocker-http <mevblocker http url> --private-key <private key> --bid-percentage <percent of profit to share as gas> --order-type <Priority|DutchV2|DutchV3> --chain-id <chain id> --executor-address <executor address>
 ```
 
-# Collectors
+## Collectors
+These collectors operate in parallel:
+- [Ethereum block collector](./src/collectors/block_collector.rs) \
+  Collects new blocks as they are confirmed. Similar to the base one in [artemis-core](https://github.com/paradigmxyz/artemis/tree/main/crates/artemis-core), but includes timestamp data to resolve Dutch decays.
+- [UniswapX order collector](./src/collectors/uniswapx_order_collector.rs) \
+  Polls UniswapX API every 250 ms to collect new executable orders as they are posted.
+- [UniswapX route collector](./src/collectors/uniswapx_route_collector.rs) \
+  Finds possible on-chain AMM routes with Uniswap API to fill shortlisted UniswapX orders. The routes are based on Uniswap V2, V3 and V4 liquidity pools.
 
-### [block-collector](./src/collectors/block_collector.rs)
+  Runs in a separate collector thread as these can be slow and would block other processing.
 
-Collects new blocks as they are confirmed. Similar to the base one in Artemis-core but includes timestamp data to resolve dutch decays
+## Supported order types
+Three UniswapX order types are supported. Each comes with its own reactor contract that settles the orders and reverts any trades that do not comply with the swap parameters.
 
-### [uniswapx-order-collector](./src/collectors/uniswapx_order_collector.rs)
+- Dutch auction V2 \
+  Reactor contract: [`V2DutchOrderReactor`](https://github.com/Uniswap/UniswapX/blob/main/src/reactors/V2DutchOrderReactor.sol)
+- Dutch auction V3 \
+  Reactor contract: [`V3DutchOrderReactor`](https://github.com/Uniswap/UniswapX/blob/main/src/reactors/V3DutchOrderReactor.sol)
+- Priority \
+  Reactor contract: [`PriorityOrderReactor`](https://github.com/Uniswap/UniswapX/blob/main/src/reactors/PriorityOrderReactor.sol)
 
-Collects new executable UniswapX orders as they are posted.
+Dutch auctions decay the execution price over time which incentivises fillers to complete orders as early as possible.
 
-### [uniswapx-route-collector](./src/collectors/uniswapx_route_collector.rs)
+The key differences between Dutch V2 and V3 are:
+- V2 measures decay using timestamps vs block numbers in V3
+- V2 uses linear decay vs non-linear in V3 \
+  V3 performs linear interpolation between checkpoints
+- V3 adjusts for a change in the gas amount between signing and filling an order
 
-Finds on-chain AMM routes to fill UniswapX orders. Ran in a separate collector thread as these can be slow and don't want to block other processing.
+The Priority reactor is only available on chains that order transactions by priority fee (`gas price - base fee`). Fillers compete by bidding with gas prices to complete an order.
 
-# Strategies
+## Fill strategies
+For each order type, a different fill strategy is used.
 
-### [uniswapx-strategy](./src/strategies/uniswapx_strategy.rs)
+### Dutch auction V2
+Available only on mainnet.
 
-Simple strategy that batches UniswapX orders together by tokenin/tokenout pair and attempts to fill using Uniswap protocol liquidity
+Steps:
+- Watches UniswapX Dutch V2 orders
+- Evaluates their state based on the block timestamp and order deadline
+- Groups orders into batches by (token_in, token_out)
+- Finds AMM routes using Uniswap protocol liquidity (`UniswapXRouteCollector`)
+- Evaluates profitability of received routes
+- Submits transaction to fill order if profitable
+- Check each block for filled orders which are removed after 5 minutes
 
-# Crates
+Code: [`UniswapXUniswapFill`](./src/strategies/uniswapx_strategy.rs)
+
+### Dutch auction V3
+Available only on Arbitrum.
+
+Compared to Dutch auction V2:
+- Tracks orders that are being executed (`processing_orders`)
+- Evaluates order state, taking into account V3 decay curve
+- Estimates gas for fill transaction
+- Computes breakeven gas price and only bids if profitable
+
+Code: [`UniswapXDutchV3Fill`](./src/strategies/dutchv3_strategy.rs)
+
+### Priority
+Available only on Base.
+
+Compared to Dutch auction V3:
+- Calculates priority fee based on the estimated gas use
+- Determines order status given the current time and the estimated target block time
+- Attempts re-routing failed orders
+- Calculates primary bid and 3 fallback bids based on the quote's magnitude
+- Submits separate transactions for each bid
+
+Code: [`UniswapXPriorityFill`](./src/strategies/priority_strategy.rs)
+
+## Keystore
+To facilitate nonce management, multiple private keys can be supplied with the `--private-key-file` parameter. When performing a transaction, a random key that is currently not in use will be used.
+
+## Crates
 
 ### [uniswapx-rs](./crates/uniswapx-rs)
 
-Library for encoding, decoding, and resolving UniswapX dutch orders
+Library for encoding, decoding, and resolving UniswapX Dutch orders
 
 ### [bindings-uniswapx](./crates/bindings-uniswapx)
 
 Autogenerated forge bindings for UniswapX contracts
 
-# Generating bindings
+## Generating bindings
 
-```
+```shell
 forge bind --root ../UniswapX  --overwrite --alloy # replace UniswapX with the path to the UniswapX repo
 ```

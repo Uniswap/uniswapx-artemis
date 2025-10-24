@@ -54,6 +54,12 @@ pub struct KeyStore {
     keys_in_use_count: Arc<AtomicUsize>,  // Track in-use count efficiently
 }
 
+impl Default for KeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyStore {
     pub fn new() -> Self {
         KeyStore {
@@ -72,7 +78,7 @@ impl KeyStore {
 
     // Gets the first key address in the store
     pub fn get_address(&self) -> Option<String> {
-        if self.keys.len() == 0 {
+        if self.keys.is_empty() {
             return None;
         }
         let mut rng = rand::thread_rng();

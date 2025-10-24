@@ -1,6 +1,6 @@
 use super::{
     shared::UniswapXStrategy,
-    types::{Config, OrderStatus, TokenInTokenOut},
+    types::{Config, TokenInTokenOut},
 };
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
@@ -10,6 +10,7 @@ use crate::{
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
     },
     shared::{normalize_erc20eth_to_native, send_metric_with_order_hash, RouteInfo},
+    strategies::shared::{DONE_EXPIRY, V2_DUTCH_ORDER_REACTOR_ADDRESS},
 };
 use alloy::{
     hex,
@@ -35,14 +36,13 @@ use uniswapx_rs::order::{Order, OrderResolution, V2DutchOrder};
 
 use super::types::{Action, Event};
 
+/// Block time in seconds
 const BLOCK_TIME: u64 = 12;
-const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct UniswapXUniswapFill {
-    /// Ethers client.
+    /// Ethereum client.
     client: Arc<DynProvider<AnyNetwork>>,
     /// executor address
     executor_address: String,
@@ -52,7 +52,9 @@ pub struct UniswapXUniswapFill {
     last_block_timestamp: u64,
     // map of open order hashes to order data
     open_orders: HashMap<String, OrderData>,
-    // map of done order hashes to time at which we can safely prune them
+    // Map of done order hashes to time at which we can safely prune them. The
+    // orders are not removed immediately since we might still receive route
+    // events for them.
     done_orders: HashMap<String, u64>,
     batch_sender: Sender<Vec<OrderBatchData>>,
     route_receiver: Receiver<RoutedOrder>,
@@ -69,8 +71,6 @@ impl UniswapXUniswapFill {
         cloudwatch_client: Option<Arc<CloudWatchClient>>,
         chain_id: u64,
     ) -> Self {
-        info!("syncing state");
-
         Self {
             client,
             executor_address: config.executor_address,
@@ -91,25 +91,23 @@ impl UniswapXUniswapFill {
 
 #[async_trait]
 impl Strategy<Event, Action> for UniswapXUniswapFill {
-    // In order to sync this strategy, we need to get the current bid for all Sudo pools.
     async fn sync_state(&mut self) -> Result<()> {
-        info!("syncing state");
-
         Ok(())
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
     async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::UniswapXOrder(order) => self.process_order_event(&order).await,
+            Event::Order(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
-            Event::UniswapXRoute(route) => self.process_new_route(&route).await,
+            Event::RoutedOrder(route) => self.process_new_route(&route).await,
         }
     }
 }
 
 impl UniswapXStrategy for UniswapXUniswapFill {}
 
+// TODO Rename to UniswapXDutchV2Fill
 impl UniswapXUniswapFill {
     fn decode_order(&self, encoded_order: &str) -> Result<V2DutchOrder, Box<dyn Error>> {
         let encoded_order = if let Some(stripped) = encoded_order.strip_prefix("0x") {
@@ -134,8 +132,14 @@ impl UniswapXUniswapFill {
             .ok();
 
         if let Some(order) = order {
-            self.update_order_state(order, &event.signature, &event.order_hash, event.route.as_ref());
+            self.update_order_state(
+                order,
+                &event.signature,
+                &event.order_hash,
+                event.route.as_ref(),
+            );
         }
+
         vec![]
     }
 
@@ -148,6 +152,7 @@ impl UniswapXUniswapFill {
         {
             return vec![];
         }
+
         let OrderBatchData {
             // orders,
             orders,
@@ -224,12 +229,15 @@ impl UniswapXUniswapFill {
             self.open_orders.len(),
             self.done_orders.len()
         );
+
+        // Remove all pending orders that were filled in the last block
         self.handle_fills().await.unwrap_or_else(|e| {
             error!("{} - Error handling fills: {}", event.number, e);
         });
         self.update_open_orders();
         self.prune_done_orders();
 
+        // Find routes using [UniswapXRouteCollector]
         self.batch_sender
             .send(self.get_order_batches().values().cloned().collect())
             .await
@@ -262,6 +270,7 @@ impl UniswapXUniswapFill {
         Ok(signed_orders)
     }
 
+    /// Derive order batches for all (token in, token out) pairs
     fn get_order_batches(&self) -> HashMap<TokenInTokenOut, OrderBatchData> {
         let mut order_batches: HashMap<TokenInTokenOut, OrderBatchData> = HashMap::new();
 
@@ -273,6 +282,10 @@ impl UniswapXUniswapFill {
                 token_out: order_data.resolved.outputs[0].token.clone(),
             };
 
+            for o in &order_data.resolved.outputs {
+                assert_eq!(o.token, token_in_token_out.token_out);
+            }
+
             let amount_in = order_data.resolved.input.amount;
             let amount_out = order_data
                 .resolved
@@ -281,15 +294,24 @@ impl UniswapXUniswapFill {
                 .fold(Uint::from(0), |sum, output| sum.wrapping_add(output.amount));
 
             let amount_required = if order_data.order.is_exact_output() {
+                // Maximum amount required
                 amount_in
             } else {
+                // Minimum amount required
                 amount_out
             };
+
             // insert new order and update total amount out
-            if let std::collections::hash_map::Entry::Vacant(e) =
-                order_batches.entry(token_in_token_out.clone())
-            {
-                e.insert(OrderBatchData {
+            order_batches
+                .entry(token_in_token_out.clone())
+                .and_modify(|order_batch_data| {
+                    order_batch_data.orders.push(order_data.clone());
+                    order_batch_data.amount_in = order_batch_data.amount_in.wrapping_add(amount_in);
+                    order_batch_data.amount_required = order_batch_data
+                        .amount_required
+                        .wrapping_add(amount_required);
+                })
+                .or_insert_with(|| OrderBatchData {
                     orders: vec![order_data.clone()],
                     amount_in,
                     amount_out,
@@ -298,20 +320,13 @@ impl UniswapXUniswapFill {
                     token_out: order_data.resolved.outputs[0].token.clone(), // No normalization needed (ERC20ETH won't be output)
                     chain_id: self.chain_id,
                 });
-            } else {
-                let order_batch_data = order_batches.get_mut(&token_in_token_out).unwrap();
-                order_batch_data.orders.push(order_data.clone());
-                order_batch_data.amount_in = order_batch_data.amount_in.wrapping_add(amount_in);
-                order_batch_data.amount_required = order_batch_data
-                    .amount_required
-                    .wrapping_add(amount_required);
-            }
         });
+
         order_batches
     }
 
     async fn handle_fills(&mut self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = V2_DUTCH_ORDER_REACTOR_ADDRESS.parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(self.last_block_number)
             .address(reactor_address)
@@ -327,7 +342,7 @@ impl UniswapXUniswapFill {
             // add to done
             self.done_orders.insert(
                 order_hash.to_string(),
-                self.current_timestamp()? + DONE_EXPIRY,
+                self.current_timestamp() + DONE_EXPIRY,
             );
         }
 
@@ -341,6 +356,7 @@ impl UniswapXUniswapFill {
                 to_remove.push(order_hash.clone());
             }
         }
+
         for order_hash in to_remove {
             self.done_orders.remove(&order_hash);
         }
@@ -371,33 +387,37 @@ impl UniswapXUniswapFill {
         if self.open_orders.contains_key(order) {
             self.open_orders.remove(order);
         }
+
         if !self.done_orders.contains_key(order) {
             self.done_orders
                 .insert(order.to_string(), self.last_block_timestamp + DONE_EXPIRY);
         }
     }
 
-    fn update_order_state(&mut self, order: V2DutchOrder, signature: &str, order_hash: &String, route: Option<&RouteInfo>) {
-        let resolved = order.resolve(self.last_block_timestamp + BLOCK_TIME);
-        let order_status: OrderStatus = match resolved {
-            OrderResolution::Expired => OrderStatus::Done,
-            OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::Resolved(resolved_order) => OrderStatus::Open(resolved_order),
-            _ => OrderStatus::Done,
-        };
-
-        match order_status {
-            OrderStatus::Done => {
+    fn update_order_state(
+        &mut self,
+        order: V2DutchOrder,
+        signature: &str,
+        order_hash: &String,
+        route: Option<&RouteInfo>,
+    ) {
+        match order.resolve(self.last_block_timestamp + BLOCK_TIME) {
+            OrderResolution::Expired
+            | OrderResolution::Invalid
+            | OrderResolution::NotFillableYet(_) => {
                 self.mark_as_done(order_hash);
             }
-            OrderStatus::Open(resolved_order) => {
+
+            OrderResolution::Resolved(resolved_order) => {
                 if self.done_orders.contains_key(order_hash) {
                     info!("{} - Order already done, skipping", order_hash);
                     return;
                 }
+
                 if !self.open_orders.contains_key(order_hash) {
                     info!("{} - Adding new order", order_hash);
                 }
+
                 self.open_orders.insert(
                     order_hash.clone(),
                     OrderData {
@@ -406,12 +426,10 @@ impl UniswapXUniswapFill {
                         signature: signature.to_string(),
                         resolved: resolved_order,
                         encoded_order: None,
-                        route: route.cloned()
+                        route: route.cloned(),
                     },
                 );
             }
-            // Noop
-            _ => {}
         }
     }
 }

@@ -23,13 +23,13 @@ macro_rules! send_metric_with_order_hash {
     };
 }
 
+pub(crate) use send_metric_with_order_hash;
+
 macro_rules! u256 {
     ($($limb:expr),*) => {
         alloy_primitives::Uint::from_limbs([$($limb, 0, 0, 0),*])
     };
 }
-
-pub(crate) use send_metric_with_order_hash;
 pub(crate) use u256;
 
 /// Normalizes ERC20ETH to native ETH (zero address) for internal processing.
@@ -147,7 +147,7 @@ pub async fn burn_nonce(
         }
         Err(e) => {
             tracing::error!("{} - Error sending nonce burn transaction: {}", order_hash, e);
-            return Err(anyhow::anyhow!("{} - Error sending nonce burn transaction: {}", order_hash, e));
+            Err(anyhow::anyhow!("{} - Error sending nonce burn transaction: {}", order_hash, e))
         }
     }
 }
