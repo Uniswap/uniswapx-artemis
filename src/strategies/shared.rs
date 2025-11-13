@@ -1,4 +1,7 @@
-use crate::collectors::uniswapx_route_collector::RoutedOrder;
+use crate::{
+    collectors::uniswapx_route_collector::RoutedOrder,
+    shared::{normalize_erc20eth_to_native_address, ERC20ETH_ADDRESS},
+};
 use alloy::{
     hex,
     network::{AnyNetwork, TransactionBuilder},
@@ -49,7 +52,10 @@ pub trait UniswapXStrategy {
         let fill_contract =
             UniversalRouterExecutor::new(Address::from_str(executor_address)?, client.clone());
 
-        let token_in = Address::from_str(&request.token_in)?;
+        // Normalize ERC20ETH to native ETH (zero address) since we'll receive native ETH during callback
+        let token_in = normalize_erc20eth_to_native_address(
+            Address::from_str(&request.token_in)?
+        );
         let token_out = Address::from_str(&request.token_out)?;
 
         let permit2_approval = self
@@ -93,8 +99,15 @@ pub trait UniswapXStrategy {
         from: &str,
         to: &str,
     ) -> Result<Vec<Token>, anyhow::Error> {
+        // Native ETH and ERC20ETH don't need approval
+        // ERC20ETH will result in native ETH transfer during callback, so no approval needed
         if token == Address::ZERO {
             return Ok(vec![]);
+        }
+        if let Ok(erc20eth_addr) = Address::from_str(ERC20ETH_ADDRESS) {
+            if token == erc20eth_addr {
+                return Ok(vec![]);
+            }
         }
         let token_contract = ERC20::new(token, client.clone());
         let allowance = token_contract

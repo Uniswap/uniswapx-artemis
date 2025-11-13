@@ -7,7 +7,7 @@ use crate::{
         block_collector::NewBlock,
         uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
-    }, shared::RouteInfo
+    }, shared::{normalize_erc20eth_to_native, RouteInfo}
 };
 use alloy::{
     hex,
@@ -319,8 +319,9 @@ impl UniswapXDutchV3Fill {
             .iter()
             .filter(|(_, order_data)| !self.processing_orders.contains(&order_data.hash))
             .for_each(|(_, order_data)| {
+                let normalized_token_in = normalize_erc20eth_to_native(&order_data.resolved.input.token);
                 let token_in_token_out = TokenInTokenOut {
-                    token_in: order_data.resolved.input.token.clone(),
+                    token_in: normalized_token_in.clone(),
                     token_out: order_data.resolved.outputs[0].token.clone(),
                 };
 
@@ -345,8 +346,8 @@ impl UniswapXDutchV3Fill {
                         amount_in,
                         amount_out,
                         amount_required,
-                        token_in: order_data.resolved.input.token.clone(),
-                        token_out: order_data.resolved.outputs[0].token.clone(),
+                        token_in: normalized_token_in,
+                        token_out: order_data.resolved.outputs[0].token.clone(), // No normalization needed (ERC20ETH won't be output)
                         chain_id: self.chain_id,
                     });
                 } else {

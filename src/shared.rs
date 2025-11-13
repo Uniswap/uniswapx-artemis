@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use alloy::{network::{AnyNetwork, EthereumWallet, TransactionBuilder}, providers::{DynProvider, Provider}, rpc::types::TransactionRequest, serde::WithOtherFields};
 use alloy_primitives::{Address, U256};
@@ -7,6 +7,10 @@ use serde::Deserialize;
 const NONCE_BURN_GAS_MULTIPLIER: u128 = 10;
 const NONCE_BURN_PRIORITY_FEE: u128 = 1e7 as u128; // 0.01 gwei (max priority bid possible)
 const ETH_TRANSFER_GAS: u64 = 21000;
+
+/// ERC20ETH address - same across all chains
+/// ERC20ETH is an ERC20 wrapper for native ETH that uses ERC-7914 for smart wallet compatibility
+pub const ERC20ETH_ADDRESS: &str = "0x00000000e20E49e6dCeE6e8283A0C090578F0fb9";
 
 macro_rules! send_metric_with_order_hash {
     ($order_hash: expr, $future: expr) => {
@@ -27,6 +31,27 @@ macro_rules! u256 {
 
 pub(crate) use send_metric_with_order_hash;
 pub(crate) use u256;
+
+/// Normalizes ERC20ETH to native ETH (zero address) for internal processing.
+/// ERC20ETH is an ERC20 wrapper for native ETH, so we treat it as native ETH
+/// since that's what we'll receive during the callback.
+pub fn normalize_erc20eth_to_native(token: &str) -> String {
+    if token.eq_ignore_ascii_case(ERC20ETH_ADDRESS) {
+        "0x0000000000000000000000000000000000000000".to_string()
+    } else {
+        token.to_string()
+    }
+}
+
+/// Normalizes ERC20ETH to native ETH (Address::ZERO) for internal processing.
+pub fn normalize_erc20eth_to_native_address(token: Address) -> Address {
+    if let Ok(erc20eth_addr) = Address::from_str(ERC20ETH_ADDRESS) {
+        if token == erc20eth_addr {
+            return Address::ZERO;
+        }
+    }
+    token
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -124,5 +149,66 @@ pub async fn burn_nonce(
             tracing::error!("{} - Error sending nonce burn transaction: {}", order_hash, e);
             return Err(anyhow::anyhow!("{} - Error sending nonce burn transaction: {}", order_hash, e));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_lowercase() {
+        let erc20eth = "0x00000000e20e49e6dcee6e8283a0c090578f0fb9";
+        let result = normalize_erc20eth_to_native(erc20eth);
+        assert_eq!(result, "0x0000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_uppercase() {
+        let erc20eth = "0x00000000E20E49E6DCEE6E8283A0C090578F0FB9";
+        let result = normalize_erc20eth_to_native(erc20eth);
+        assert_eq!(result, "0x0000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_mixed_case() {
+        let erc20eth = ERC20ETH_ADDRESS; // Already mixed case
+        let result = normalize_erc20eth_to_native(erc20eth);
+        assert_eq!(result, "0x0000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_regular_token() {
+        let token = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        let result = normalize_erc20eth_to_native(token);
+        assert_eq!(result, token);
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_zero_address() {
+        let zero = "0x0000000000000000000000000000000000000000";
+        let result = normalize_erc20eth_to_native(zero);
+        assert_eq!(result, zero); // Should remain unchanged
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_address_erc20eth() {
+        let erc20eth = Address::from_str(ERC20ETH_ADDRESS).unwrap();
+        let result = normalize_erc20eth_to_native_address(erc20eth);
+        assert_eq!(result, Address::ZERO);
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_address_regular_token() {
+        let token = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let result = normalize_erc20eth_to_native_address(token);
+        assert_eq!(result, token);
+    }
+
+    #[test]
+    fn test_normalize_erc20eth_to_native_address_zero() {
+        let zero = Address::ZERO;
+        let result = normalize_erc20eth_to_native_address(zero);
+        assert_eq!(result, Address::ZERO);
     }
 }
