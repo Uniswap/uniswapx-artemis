@@ -11,7 +11,7 @@ use crate::{
         uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, OrderRoute, RoutedOrder},
     },
-    shared::RouteInfo,
+    shared::{normalize_erc20eth_to_native, RouteInfo},
     strategies::types::SubmitTxToMempoolWithExecutionMetadata,
 };
 use alloy::{
@@ -501,8 +501,8 @@ impl UniswapXPriorityFill {
             amount_in,
             amount_out,
             amount_required: if order_data.order.is_exact_output() { amount_in } else { amount_out },
-            token_in: order_data.resolved.input.token.clone(),
-            token_out: order_data.resolved.outputs[0].token.clone(),
+            token_in: normalize_erc20eth_to_native(&order_data.resolved.input.token),
+            token_out: order_data.resolved.outputs[0].token.clone(), // No normalization needed (ERC20ETH won't be output)
             chain_id: self.chain_id,
         }
     }

@@ -1,4 +1,7 @@
-use crate::collectors::uniswapx_route_collector::RoutedOrder;
+use crate::{
+    collectors::uniswapx_route_collector::RoutedOrder,
+    shared::{ERC20ETH_ADDRESS, normalize_erc20eth_to_native},
+};
 use alloy::{
     hex,
     network::{AnyNetwork, TransactionBuilder},
@@ -17,7 +20,6 @@ use bindings_uniswapx::{
 };
 use ethabi::{ethereum_types::H160, Token};
 use std::{
-    str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -47,10 +49,12 @@ pub trait UniswapXStrategy {
     ) -> Result<WithOtherFields<TransactionRequest>> {
         let chain_id = client.get_chain_id().await?;
         let fill_contract =
-            UniversalRouterExecutor::new(Address::from_str(executor_address)?, client.clone());
+            UniversalRouterExecutor::new(executor_address.parse::<Address>()?, client.clone());
 
-        let token_in = Address::from_str(&request.token_in)?;
-        let token_out = Address::from_str(&request.token_out)?;
+        // Normalize ERC20ETH to native ETH (zero address) since we'll receive native ETH during callback
+        let normalized_token_in = normalize_erc20eth_to_native(&request.token_in);
+        let token_in = normalized_token_in.parse::<Address>()?;
+        let token_out = request.token_out.parse::<Address>()?;
 
         let permit2_approval = self
             .get_tokens_to_approve(client.clone(), token_in, executor_address, PERMIT2_ADDRESS)
@@ -93,14 +97,21 @@ pub trait UniswapXStrategy {
         from: &str,
         to: &str,
     ) -> Result<Vec<Token>, anyhow::Error> {
+        // Native ETH and ERC20ETH don't need approval
+        // ERC20ETH will result in native ETH transfer during callback, so no approval needed
         if token == Address::ZERO {
             return Ok(vec![]);
+        }
+        if let Ok(erc20eth_addr) = ERC20ETH_ADDRESS.parse::<Address>() {
+            if token == erc20eth_addr {
+                return Ok(vec![]);
+            }
         }
         let token_contract = ERC20::new(token, client.clone());
         let allowance = token_contract
             .allowance(
-                Address::from_str(from).expect("Error encoding from address"),
-                Address::from_str(to).expect("Error encoding from address"),
+                from.parse::<Address>().expect("Error encoding from address"),
+                to.parse::<Address>().expect("Error encoding from address"),
             )
             .call()
             .await

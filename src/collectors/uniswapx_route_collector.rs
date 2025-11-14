@@ -18,7 +18,7 @@ use reqwest::{Client, StatusCode};
 
 use crate::{
     aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue},
-    shared::{send_metric_with_order_hash, RouteInfo, MethodParameters},
+    shared::{normalize_erc20eth_to_native, send_metric_with_order_hash, RouteInfo, MethodParameters},
 };
 
 const ROUTING_API: &str = "https://api.uniswap.org/v1/quote";
@@ -353,9 +353,62 @@ impl Collector<RoutedOrder> for UniswapXRouteCollector {
 }
 
 // The Uniswap routing API requires that "ETH" be used instead of the zero address
+// Also normalizes ERC20ETH to "ETH" since we route using native ETH
 fn resolve_address(token: String) -> String {
-    if token == "0x0000000000000000000000000000000000000000" {
+    let normalized = normalize_erc20eth_to_native(&token);
+    if normalized == "0x0000000000000000000000000000000000000000" {
         return "ETH".to_string();
     }
-    token
+    normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolve_address_test(token: &str) -> String {
+        resolve_address(token.to_string())
+    }
+
+    #[test]
+    fn test_resolve_address_erc20eth_lowercase() {
+        let erc20eth = "0x00000000e20e49e6dcee6e8283a0c090578f0fb9";
+        let result = resolve_address_test(erc20eth);
+        assert_eq!(result, "ETH");
+    }
+
+    #[test]
+    fn test_resolve_address_erc20eth_uppercase() {
+        let erc20eth = "0x00000000E20E49E6DCEE6E8283A0C090578F0FB9";
+        let result = resolve_address_test(erc20eth);
+        assert_eq!(result, "ETH");
+    }
+
+    #[test]
+    fn test_resolve_address_erc20eth_mixed_case() {
+        let erc20eth = "0x00000000e20E49e6dCeE6e8283A0C090578F0fb9";
+        let result = resolve_address_test(erc20eth);
+        assert_eq!(result, "ETH");
+    }
+
+    #[test]
+    fn test_resolve_address_zero_address() {
+        let zero = "0x0000000000000000000000000000000000000000";
+        let result = resolve_address_test(zero);
+        assert_eq!(result, "ETH");
+    }
+
+    #[test]
+    fn test_resolve_address_regular_token() {
+        let token = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // WETH
+        let result = resolve_address_test(token);
+        assert_eq!(result, token);
+    }
+
+    #[test]
+    fn test_resolve_address_other_token() {
+        let token = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; // USDC
+        let result = resolve_address_test(token);
+        assert_eq!(result, token);
+    }
 }
