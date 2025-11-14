@@ -212,7 +212,7 @@ impl UniswapXDutchV3Fill {
             match tx_request {
                 Ok(mut req) => {
                     // Must be able to cover min gas cost
-                    let sender_address = Address::from_str(&self.sender_address).unwrap();
+                    let sender_address = self.sender_address.parse::<Address>().unwrap();
                     req.set_from(sender_address);
                     let gas_usage = self.client.estimate_gas(&req).await.map_or_else(
                         |err| {

@@ -1,5 +1,5 @@
 use alloy_primitives::{utils::format_units, Address, U128};
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use alloy::{
@@ -118,7 +118,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
                 .unwrap()
                 .with_chain_id(Some(chain_id)),
         );
-        let address = Address::from_str(&addr).unwrap();
+        let address = addr.parse::<Address>().unwrap();
         action.tx.set_from(address);
 
 

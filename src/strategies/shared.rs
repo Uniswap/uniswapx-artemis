@@ -1,6 +1,6 @@
 use crate::{
     collectors::uniswapx_route_collector::RoutedOrder,
-    shared::{normalize_erc20eth_to_native_address, ERC20ETH_ADDRESS},
+    shared::{ERC20ETH_ADDRESS, normalize_erc20eth_to_native},
 };
 use alloy::{
     hex,
@@ -20,7 +20,6 @@ use bindings_uniswapx::{
 };
 use ethabi::{ethereum_types::H160, Token};
 use std::{
-    str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -50,13 +49,12 @@ pub trait UniswapXStrategy {
     ) -> Result<WithOtherFields<TransactionRequest>> {
         let chain_id = client.get_chain_id().await?;
         let fill_contract =
-            UniversalRouterExecutor::new(Address::from_str(executor_address)?, client.clone());
+            UniversalRouterExecutor::new(executor_address.parse::<Address>()?, client.clone());
 
         // Normalize ERC20ETH to native ETH (zero address) since we'll receive native ETH during callback
-        let token_in = normalize_erc20eth_to_native_address(
-            Address::from_str(&request.token_in)?
-        );
-        let token_out = Address::from_str(&request.token_out)?;
+        let normalized_token_in = normalize_erc20eth_to_native(&request.token_in);
+        let token_in = normalized_token_in.parse::<Address>()?;
+        let token_out = request.token_out.parse::<Address>()?;
 
         let permit2_approval = self
             .get_tokens_to_approve(client.clone(), token_in, executor_address, PERMIT2_ADDRESS)
@@ -104,7 +102,7 @@ pub trait UniswapXStrategy {
         if token == Address::ZERO {
             return Ok(vec![]);
         }
-        if let Ok(erc20eth_addr) = Address::from_str(ERC20ETH_ADDRESS) {
+        if let Ok(erc20eth_addr) = ERC20ETH_ADDRESS.parse::<Address>() {
             if token == erc20eth_addr {
                 return Ok(vec![]);
             }
@@ -112,8 +110,8 @@ pub trait UniswapXStrategy {
         let token_contract = ERC20::new(token, client.clone());
         let allowance = token_contract
             .allowance(
-                Address::from_str(from).expect("Error encoding from address"),
-                Address::from_str(to).expect("Error encoding from address"),
+                from.parse::<Address>().expect("Error encoding from address"),
+                to.parse::<Address>().expect("Error encoding from address"),
             )
             .call()
             .await

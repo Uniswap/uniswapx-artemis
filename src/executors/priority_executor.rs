@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 use tracing::{info, warn, debug};
 
 use alloy::{
@@ -316,7 +316,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                     .unwrap()
                     .with_chain_id(Some(chain_id)),
             );
-            let address = Address::from_str(&addr).unwrap();
+            let address = addr.parse::<Address>().unwrap();
 
             action.execution.tx.set_from(address);
 

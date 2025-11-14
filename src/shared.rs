@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use alloy::{network::{AnyNetwork, EthereumWallet, TransactionBuilder}, providers::{DynProvider, Provider}, rpc::types::TransactionRequest, serde::WithOtherFields};
 use alloy_primitives::{Address, U256};
@@ -45,7 +45,7 @@ pub fn normalize_erc20eth_to_native(token: &str) -> String {
 
 /// Normalizes ERC20ETH to native ETH (Address::ZERO) for internal processing.
 pub fn normalize_erc20eth_to_native_address(token: Address) -> Address {
-    if let Ok(erc20eth_addr) = Address::from_str(ERC20ETH_ADDRESS) {
+    if let Ok(erc20eth_addr) = ERC20ETH_ADDRESS.parse::<Address>() {
         if token == erc20eth_addr {
             return Address::ZERO;
         }
@@ -193,14 +193,14 @@ mod tests {
 
     #[test]
     fn test_normalize_erc20eth_to_native_address_erc20eth() {
-        let erc20eth = Address::from_str(ERC20ETH_ADDRESS).unwrap();
+        let erc20eth = ERC20ETH_ADDRESS.parse::<Address>().unwrap();
         let result = normalize_erc20eth_to_native_address(erc20eth);
         assert_eq!(result, Address::ZERO);
     }
 
     #[test]
     fn test_normalize_erc20eth_to_native_address_regular_token() {
-        let token = Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap();
+        let token = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".parse::<Address>().unwrap();
         let result = normalize_erc20eth_to_native_address(token);
         assert_eq!(result, token);
     }
