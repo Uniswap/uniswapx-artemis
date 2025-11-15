@@ -1,14 +1,16 @@
 use super::{
     shared::UniswapXStrategy,
-    types::{Config, OrderStatus, TokenInTokenOut},
+    types::{Config, TokenInTokenOut},
 };
 use crate::{
-    aws_utils::cloudwatch_utils::{CwMetrics, DimensionName, DimensionValue, MetricBuilder, ARTEMIS_NAMESPACE}, collectors::{
+    aws_utils::cloudwatch_utils::{
+        CwMetrics, DimensionName, DimensionValue, MetricBuilder, ARTEMIS_NAMESPACE,
+    },
+    collectors::{
         block_collector::NewBlock,
         uniswapx_order_collector::UniswapXOrder,
         uniswapx_route_collector::{OrderBatchData, OrderData, RoutedOrder},
-    }, shared::{normalize_erc20eth_to_native, RouteInfo}
-};
+    }, shared::{normalize_erc20eth_to_native, RouteInfo}, send_metric, strategies::shared::DONE_EXPIRY, };
 use alloy::{
     hex,
     network::{AnyNetwork, TransactionBuilder},
@@ -39,15 +41,21 @@ use uniswapx_rs::order::{Order, OrderResolution, V3DutchOrder};
 
 use super::types::{Action, Event};
 
-const DONE_EXPIRY: u64 = 300;
-const REACTOR_ADDRESS: &str = "0xB274d5F4b833b61B340b654d600A864fB604a87c";
+/// If the gas price could not be estimated, use this value
+pub const DEFAULT_GAS_PRICE: u64 = 1_000_000;
+
+/// Minimum gas price on Ethereum chain
+const MIN_ETHEREUM_GAS_PRICE: u64 = 10_000_000;
+
+/// DutchV3OrderReactor contract address on Arbitrum
+const DUTCH_V3_ORDER_REACTOR_ADDRESS: &str = "0xB274d5F4b833b61B340b654d600A864fB604a87c";
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct UniswapXDutchV3Fill {
-    /// Ethers client.
+    /// Ethers client
     client: Arc<DynProvider<AnyNetwork>>,
-    // AWS Cloudwatch CLient for metrics propagation
+    /// AWS Cloudwatch client for metrics propagation
     cloudwatch_client: Option<Arc<CloudWatchClient>>,
     /// executor address
     executor_address: String,
@@ -55,11 +63,11 @@ pub struct UniswapXDutchV3Fill {
     bid_percentage: u128,
     last_block_number: u64,
     last_block_timestamp: u64,
-    // map of open order hashes to order data
+    /// map of open order hashes to order data
     open_orders: HashMap<String, OrderData>,
-    // map of order hashes that are currently being processed (routed/executed)
+    /// map of order hashes that are currently being processed (routed/executed)
     processing_orders: HashSet<String>,
-    // map of done order hashes to time at which we can safely prune them
+    /// map of done order hashes to time at which we can safely prune them
     done_orders: HashMap<String, u64>,
     batch_sender: Sender<Vec<OrderBatchData>>,
     route_receiver: Receiver<RoutedOrder>,
@@ -77,8 +85,6 @@ impl UniswapXDutchV3Fill {
         sender_address: String,
         chain_id: u64,
     ) -> Self {
-        info!("syncing state");
-
         Self {
             client,
             cloudwatch_client,
@@ -101,19 +107,16 @@ impl UniswapXDutchV3Fill {
 
 #[async_trait]
 impl Strategy<Event, Action> for UniswapXDutchV3Fill {
-    // In order to sync this strategy, we need to get the current bid for all Sudo pools.
     async fn sync_state(&mut self) -> Result<()> {
-        info!("syncing state");
-
         Ok(())
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
     async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::UniswapXOrder(order) => self.process_order_event(&order).await,
+            Event::Order(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
-            Event::UniswapXRoute(route) => self.process_new_route(&route).await,
+            Event::RoutedOrder(route) => self.process_new_route(&route).await,
         }
     }
 }
@@ -132,12 +135,13 @@ impl UniswapXDutchV3Fill {
         } else {
             encoded_order
         };
+
         let order_hex: Vec<u8> = hex::decode(encoded_order)?;
 
         V3DutchOrder::decode_inner(&order_hex, false)
     }
 
-    // Process new orders as they come in.
+    /// Process new orders as they come in
     async fn process_order_event(&mut self, event: &UniswapXOrder) -> Vec<Action> {
         if self.last_block_timestamp == 0 || self.processing_orders.contains(&event.order_hash) {
             return vec![];
@@ -145,16 +149,22 @@ impl UniswapXDutchV3Fill {
 
         let order = self
             .decode_order(&event.encoded_order)
-            .map_err(|e| error!("failed to decode: {}", e))
-            .ok();
+            .map_err(|e| error!("failed to decode: {}", e));
 
-        if let Some(order) = order {
-            let wrapper = DutchV3OrderWrapper {
-                inner: order,
-                encoded_order: event.encoded_order.clone(),
-            };
-            self.update_order_state(wrapper, &event.signature, &event.order_hash, event.route.as_ref());
-        }
+        let Ok(order) = order else { return vec![] };
+
+        let wrapper = DutchV3OrderWrapper {
+            inner: order,
+            encoded_order: event.encoded_order.clone(),
+        };
+
+        self.update_order_state(
+            wrapper,
+            &event.signature,
+            &event.order_hash,
+            event.route.as_ref(),
+        );
+
         vec![]
     }
 
@@ -185,7 +195,11 @@ impl UniswapXDutchV3Fill {
         }
 
         let amount_required_u256 = U256::from_str_radix(&amount_required.to_string(), 10).ok();
-        info!("Quote: {:?}, Amount required: {:?}", event.route.quote_gas_adjusted, amount_required_u256);
+        info!(
+            "Quote: {:?}, Amount required: {:?}",
+            event.route.quote_gas_adjusted, amount_required_u256
+        );
+
         if let Some(profit) = self.get_profit_eth(event) {
             info!(
                 "Sending trade: num trades: {} routed quote: {}, batch needs: {}, profit: {} wei",
@@ -200,7 +214,7 @@ impl UniswapXDutchV3Fill {
                     error!("Error getting signed orders: {}", e);
                     vec![]
                 });
-            let tx_request = self
+            let fill_request = self
                 .build_fill(
                     self.client.clone(),
                     &self.executor_address,
@@ -209,32 +223,32 @@ impl UniswapXDutchV3Fill {
                 )
                 .await;
 
-            match tx_request {
-                Ok(mut req) => {
+            match fill_request {
+                Ok(mut fill_req) => {
                     // Must be able to cover min gas cost
                     let sender_address = self.sender_address.parse::<Address>().unwrap();
-                    req.set_from(sender_address);
-                    let gas_usage = self.client.estimate_gas(&req).await.map_or_else(
+                    fill_req.set_from(sender_address);
+                    let gas_usage = self.client.estimate_gas(&fill_req).await.map_or_else(
                         |err| {
                             info!("Error estimating gas: {}", err);
                             if err.to_string().contains("execution reverted") {
                                 None
                             } else {
-                                Some(1_000_000)
+                                Some(DEFAULT_GAS_PRICE)
                             }
                         },
                         Some,
                     );
 
-                    if gas_usage.is_none() {
+                    let Some(gas_usage) = gas_usage else {
                         return vec![];
-                    }
-                    let gas_usage = gas_usage.unwrap();
+                    };
+
                     // Get the current min gas price
                     let min_gas_price = self
                         .get_arbitrum_min_gas_price(self.client.clone())
                         .await
-                        .unwrap_or(U256::from(10_000_000));
+                        .unwrap_or(U256::from(MIN_ETHEREUM_GAS_PRICE));
 
                     // gas price at which we'd break even, meaning 100% of profit goes to validator
                     let breakeven_gas_price = profit / U256::from(gas_usage);
@@ -254,7 +268,7 @@ impl UniswapXDutchV3Fill {
                         self.processing_orders.insert(order.hash.clone());
                     }
                     return vec![Action::SubmitTx(SubmitTxToMempool {
-                        tx: req,
+                        tx: fill_req,
                         gas_bid_info: Some(GasBidInfo {
                             bid_percentage: U128::from(self.bid_percentage),
                             total_profit: U128::from(profit),
@@ -302,7 +316,7 @@ impl UniswapXDutchV3Fill {
     /// encode orders into generic signed orders
     fn get_signed_orders(&self, orders: Vec<OrderData>) -> Result<Vec<SignedOrder>> {
         let mut signed_orders: Vec<SignedOrder> = Vec::new();
-        for batch in orders.iter() {
+        for batch in &orders {
             signed_orders.push(SignedOrder {
                 order: Bytes::from_str(batch.encoded_order.as_ref().unwrap())?,
                 sig: Bytes::from_str(&batch.signature)?,
@@ -314,7 +328,7 @@ impl UniswapXDutchV3Fill {
     fn get_order_batches(&self) -> HashMap<TokenInTokenOut, OrderBatchData> {
         let mut order_batches: HashMap<TokenInTokenOut, OrderBatchData> = HashMap::new();
 
-        // group orders by token in, token out, and order type (exact_in or exact_out)
+        // group orders by token in and token out
         self.open_orders
             .iter()
             .filter(|(_, order_data)| !self.processing_orders.contains(&order_data.hash))
@@ -337,11 +351,19 @@ impl UniswapXDutchV3Fill {
                 } else {
                     amount_out
                 };
+
                 // insert new order and update total amount out
-                if let std::collections::hash_map::Entry::Vacant(e) =
-                    order_batches.entry(token_in_token_out.clone())
-                {
-                    e.insert(OrderBatchData {
+                order_batches
+                    .entry(token_in_token_out.clone())
+                    .and_modify(|order_batch_data| {
+                        order_batch_data.orders.push(order_data.clone());
+                        order_batch_data.amount_in =
+                            order_batch_data.amount_in.wrapping_add(amount_in);
+                        order_batch_data.amount_required = order_batch_data
+                            .amount_required
+                            .wrapping_add(amount_required);
+                    })
+                    .or_insert_with(|| OrderBatchData {
                         orders: vec![order_data.clone()],
                         amount_in,
                         amount_out,
@@ -350,21 +372,13 @@ impl UniswapXDutchV3Fill {
                         token_out: order_data.resolved.outputs[0].token.clone(), // No normalization needed (ERC20ETH won't be output)
                         chain_id: self.chain_id,
                     });
-                } else {
-                    let order_batch_data = order_batches.get_mut(&token_in_token_out).unwrap();
-                    order_batch_data.orders.push(order_data.clone());
-                    order_batch_data.amount_in = order_batch_data.amount_in.wrapping_add(amount_in);
-                    order_batch_data.amount_required = order_batch_data
-                        .amount_required
-                        .wrapping_add(amount_required);
-                }
             });
-        
+
         order_batches
     }
 
     async fn handle_fills(&mut self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = DUTCH_V3_ORDER_REACTOR_ADDRESS.parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(self.last_block_number)
             .address(reactor_address)
@@ -380,7 +394,7 @@ impl UniswapXDutchV3Fill {
             // add to done
             self.done_orders.insert(
                 order_hash.to_string(),
-                self.current_timestamp()? + DONE_EXPIRY,
+                self.current_timestamp() + DONE_EXPIRY,
             );
         }
 
@@ -444,41 +458,37 @@ impl UniswapXDutchV3Fill {
         let resolved = order
             .inner
             .resolve(self.last_block_number, self.last_block_timestamp);
-        let order_status: OrderStatus = match resolved {
-            OrderResolution::Expired => OrderStatus::Done,
-            OrderResolution::Invalid => OrderStatus::Done,
-            OrderResolution::Resolved(resolved_order) => OrderStatus::Open(resolved_order),
-            _ => OrderStatus::Done,
-        };
 
-        match order_status {
-            OrderStatus::Done => {
+        match resolved {
+            OrderResolution::Expired
+            | OrderResolution::Invalid
+            | OrderResolution::NotFillableYet(_) => {
                 self.mark_as_done(order_hash);
             }
-            OrderStatus::Open(resolved_order) => {
+
+            OrderResolution::Resolved(resolved_order) => {
                 if self.done_orders.contains_key(order_hash) {
                     info!("{} - Order already done, skipping", order_hash);
                     return;
                 }
                 if !self.open_orders.contains_key(order_hash) {
                     info!("{} - Adding new order", order_hash);
-                    
+
                     if let Some(cw) = &self.cloudwatch_client {
                         let metric_future = cw
                             .put_metric_data()
                             .namespace(ARTEMIS_NAMESPACE)
                             .metric_data(
                                 MetricBuilder::new(CwMetrics::OrderReceived(self.chain_id))
-                                    .add_dimension(DimensionName::Service.as_ref(), DimensionValue::V3Executor.as_ref())
+                                    .add_dimension(
+                                        DimensionName::Service.as_ref(),
+                                        DimensionValue::V3Executor.as_ref(),
+                                    )
                                     .with_value(1.0)
                                     .build(),
                             )
                             .send();
-                        tokio::spawn(async move {
-                            if let Err(e) = metric_future.await {
-                                warn!("Error sending order received metric: {:?}", e);
-                            }
-                        });
+                        send_metric!(metric_future);
                     }
 
                     self.open_orders.insert(
@@ -494,8 +504,6 @@ impl UniswapXDutchV3Fill {
                     );
                 }
             }
-            // Noop
-            _ => {}
         }
     }
 }

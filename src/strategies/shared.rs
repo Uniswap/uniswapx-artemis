@@ -24,9 +24,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+/// Seconds after which done orders will be removed
+///
+/// 5 minutes
+pub const DONE_EXPIRY: u64 = 300;
+
+/// If the gas price could not be estimated, this value is used
+pub const DEFAULT_GAS_PRICE: u64 = 1_000_000;
+
+/// V2DutchOrderReactor on Mainnet
+pub const V2_DUTCH_ORDER_REACTOR_ADDRESS: &str = "0x00000011F84B9aa48e5f8aA8B9897600006289Be";
+
+/// Valid on Mainnet, Arbitrum, Unichain, Base
 const PERMIT2_ADDRESS: &str = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
 pub const WETH_ADDRESS: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+
 const ARBITRUM_GAS_PRECOMPILE: &str = "0x000000000000000000000000000000000000006C";
 
 sol! {
@@ -39,7 +52,7 @@ sol! {
 
 #[async_trait]
 pub trait UniswapXStrategy {
-    // builds a transaction to fill an order
+    /// Builds transaction to fill given order
     async fn build_fill(
         &self,
         client: Arc<DynProvider<AnyNetwork>>,
@@ -61,19 +74,25 @@ pub trait UniswapXStrategy {
             .await?;
 
         let reactor_approval = self
-            .get_tokens_to_approve(client.clone(), token_out, executor_address, REACTOR_ADDRESS)
+            .get_tokens_to_approve(
+                client.clone(),
+                token_out,
+                executor_address,
+                V2_DUTCH_ORDER_REACTOR_ADDRESS,
+            )
             .await?;
 
         let execute_bytes = &route.method_parameters.calldata;
         let encoded_execute_bytes = hex::decode(&execute_bytes[2..]).expect("Failed to decode hex");
 
-        // abi encode as [tokens to approve to swap router 02, tokens to approve to reactor,  multicall data]
+        // ABI-encode as [tokens to approve to swap router 02, tokens to approve to reactor,  multicall data]
         //               [address[], address[], bytes[]]
         let encoded_calldata = ethabi::encode(&[
             Token::Array(permit2_approval),
             Token::Array(reactor_approval),
             Token::Bytes(encoded_execute_bytes),
         ]);
+
         let orders: Vec<UniversalRouterExecutor::SignedOrder> = signed_orders
             .into_iter()
             .map(|order| UniversalRouterExecutor::SignedOrder {
@@ -81,13 +100,14 @@ pub trait UniswapXStrategy {
                 sig: order.sig,
             })
             .collect();
+
         let call = fill_contract.executeBatch(orders, Bytes::from(encoded_calldata));
         Ok(call.into_transaction_request().with_chain_id(chain_id))
     }
 
-    fn current_timestamp(&self) -> Result<u64> {
-        let start = SystemTime::now();
-        Ok(start.duration_since(UNIX_EPOCH)?.as_secs())
+    fn current_timestamp(&self) -> u64 {
+        let now = SystemTime::now();
+        now.duration_since(UNIX_EPOCH).unwrap().as_secs()
     }
 
     async fn get_tokens_to_approve(
@@ -107,7 +127,9 @@ pub trait UniswapXStrategy {
                 return Ok(vec![]);
             }
         }
+
         let token_contract = ERC20::new(token, client.clone());
+
         let allowance = token_contract
             .allowance(
                 from.parse::<Address>().expect("Error encoding from address"),
@@ -116,6 +138,12 @@ pub trait UniswapXStrategy {
             .call()
             .await
             .expect("Failed to get allowance");
+
+        // Wallets set allowance to U256::MAX to represent "infinite approval".
+        // Comparing the allowance to MAX/2 lets us avoid a strict equality
+        // check.
+        //
+        // If the allowance is below this threshold, the token needs approval.
         if allowance._0 < U256::MAX / U256::from(2) {
             Ok(vec![Token::Address(H160(token.0 .0))])
         } else {
@@ -123,17 +151,21 @@ pub trait UniswapXStrategy {
         }
     }
 
+    /// Returns ETH profit in wei
     fn get_profit_eth(&self, RoutedOrder { request, route, .. }: &RoutedOrder) -> Option<U256> {
         let quote = U256::from_str_radix(&route.quote, 10).ok()?;
         let amount_required =
             U256::from_str_radix(&request.amount_required.to_string(), 10).ok()?;
-        
+
         // exact_out: quote must be less than amount_in_required
         // exact_in: quote must be greater than amount_out_required
-        if (request.orders.first().unwrap().order.is_exact_output() && quote.ge(&amount_required)) ||
-            (!request.orders.first().unwrap().order.is_exact_output() && quote.le(&amount_required)) {
-             return None;
-         }
+        if (request.orders.first().unwrap().order.is_exact_output() && quote.ge(&amount_required))
+            || (!request.orders.first().unwrap().order.is_exact_output()
+                && quote.le(&amount_required))
+        {
+            // No profit
+            return None;
+        }
 
         // exact_out: profit = amount_in_required - quote
         // exact_in: profit = quote - amount_out_required
@@ -147,24 +179,29 @@ pub trait UniswapXStrategy {
             return Some(profit_quote);
         }
 
+        // Convert profit to ETH using the gas estimate:
+        //
+        // gas_use_eth = gas_use_estimate * gas_price_wei
+        // profit_eth = profit_quote * gas_use_eth / gas_use_estimate_quote
         let gas_use_eth = U256::from_str_radix(&route.gas_use_estimate, 10)
             .ok()?
             .saturating_mul(U256::from_str_radix(&route.gas_price_wei, 10).ok()?);
+
         profit_quote
             .saturating_mul(gas_use_eth)
             .checked_div(U256::from_str_radix(&route.gas_use_estimate_quote, 10).ok()?)
     }
 
-    /// Converts the quote amount to ETH equivalent value
-    /// 
+    /// Converts the quote amount to ETH-equivalent value
+    ///
     /// For WETH output tokens, returns the quote directly since it's already in ETH.
     /// For non-WETH output tokens, converts using the following formula:
     /// quote_eth = quote * gas_wei / gas_in_quote
-    /// 
+    ///
     /// # Arguments
     /// * `request` - The order request containing token information
     /// * `route` - The route containing quote and gas estimates
-    /// 
+    ///
     /// # Returns
     /// * `Some(U256)` - The quote value in ETH
     /// * `None` - If any conversion fails or division by zero would occur
@@ -179,6 +216,7 @@ pub trait UniswapXStrategy {
         let gas_use_eth = U256::from_str_radix(&route.gas_use_estimate, 10)
             .ok()?
             .saturating_mul(U256::from_str_radix(&route.gas_price_wei, 10).ok()?);
+
         quote
             .saturating_mul(gas_use_eth)
             .checked_div(U256::from_str_radix(&route.gas_use_estimate_quote, 10).ok()?)

@@ -12,7 +12,9 @@ use crate::{
         uniswapx_route_collector::{OrderBatchData, OrderData, OrderRoute, RoutedOrder},
     },
     shared::{normalize_erc20eth_to_native, RouteInfo},
-    strategies::types::SubmitTxToMempoolWithExecutionMetadata,
+    executors::priority_executor::UNICHAIN_ID,
+    send_metric,
+    strategies::{shared::DONE_EXPIRY, types::SubmitTxToMempoolWithExecutionMetadata},
 };
 use alloy::{
     hex,
@@ -40,27 +42,32 @@ use uniswapx_rs::order::{Order, OrderResolution, PriorityOrder, BPS, MPS};
 
 use super::types::{Action, Event};
 
-const DONE_EXPIRY: u64 = 300;
-// Base addresses
-const REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
+/// 0 = Do not apply a priority fee
+const PRIORITY_FEE_WEI: u64 = 0;
+
+/// PriorityOrderReactor contract on Base chain
+const PRIORITY_ORDER_REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
+
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
+
+const MIN_BLOCK_PERCENTAGE_BUFFER_DEFAULT: u64 = 100;
 
 fn get_block_time_ms(chain_id: u64) -> u64 {
     match chain_id {
-        130 => 1000,   // Unichain
-        8453 => 2000,  // Base Mainnet
-        _ => 2000,     // Default to 2 seconds for unknown chains
+        UNICHAIN_ID => 1000, // Unichain
+        8453 => 2000,        // Base Mainnet
+        _ => 2000,           // Default to 2 seconds for unknown chains
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionMetadata {
-    // amount of quote token we can get
+    /// amount of quote token we can get
     pub quote: U256,
     pub quote_eth: Option<U256>,
-    // whether the order is an exact output order
+    /// whether the order is an exact output order
     pub exact_output: bool,
-    // amount of quote token needed to fill the order
+    /// amount of quote token needed to fill the order
     pub amount_required: U256,
     pub gas_use_estimate_quote: U256,
     pub order_hash: String,
@@ -94,9 +101,13 @@ impl ExecutionMetadata {
     pub fn calculate_priority_fee(&self, bid_bps: U128) -> Option<U256> {
         // exact_out: quote must be less than amount_in_required
         // exact_in: quote must be greater than amount_out_required
-        if (self.exact_output && self.quote.ge(&self.amount_required)) ||
-           (!self.exact_output && self.quote.le(&self.amount_required)) {
-            info!("{} - quote is not less than amount_required, skipping", self.order_hash);
+        if (self.exact_output && self.quote.ge(&self.amount_required))
+            || (!self.exact_output && self.quote.le(&self.amount_required))
+        {
+            info!(
+                "{} - quote is not less than amount_required, skipping",
+                self.order_hash
+            );
             return None;
         }
 
@@ -111,21 +122,31 @@ impl ExecutionMetadata {
         let mps_of_improvement = profit_quote
             .saturating_mul(U256::from(MPS))
             .checked_div(self.amount_required)?;
+
         let priority_fee = mps_of_improvement
             .checked_mul(U256::from(bid_bps))?
             .checked_div(U256::from(BPS))?;
+
         Some(priority_fee)
     }
 
-    // Uses the gas_use_estimate_quote to calculate the maximum priority fee we can bid
-    // @param gas_buffer: The buffer to multiply the gas use estimate by
+    /// Uses the gas_use_estimate_quote to calculate the maximum priority fee we can bid
+    ///
+    /// - `gas_buffer`: The buffer to multiply the gas use estimate by
     pub fn calculate_priority_fee_from_gas_use_estimate(&self, gas_buffer: U256) -> Option<U256> {
         let gas_with_buffer = U256::from(self.gas_use_estimate_quote).checked_mul(gas_buffer)?;
 
         // exact_out: quote must be less than amount_in_required - gas_with_buffer
         // exact_in: quote must be greater than amount_out_required + gas_with_buffer
-        if (self.exact_output && self.quote.ge(&self.amount_required.checked_sub(gas_with_buffer)?)) ||
-           (!self.exact_output && self.quote.le(&self.amount_required.checked_add(gas_with_buffer)?)) {
+        if (self.exact_output
+            && self
+                .quote
+                .ge(&self.amount_required.checked_sub(gas_with_buffer)?))
+            || (!self.exact_output
+                && self
+                    .quote
+                    .le(&self.amount_required.checked_add(gas_with_buffer)?))
+        {
             return None;
         }
 
@@ -150,7 +171,7 @@ impl ExecutionMetadata {
 }
 
 /// Strategy for filling UniswapX Priority Orders
-/// 
+///
 /// This strategy:
 /// - Tracks new orders from the UniswapX API
 /// - Routes orders through Uniswap's routing API
@@ -170,7 +191,7 @@ pub struct UniswapXPriorityFill {
     fallback_bid_scale_factor: Option<u64>,
     last_block_number: RwLock<u64>,
     last_block_timestamp: RwLock<u64>,
-    // map of new order hashes to order data
+    // map of new order hashes to order data, tracking the route
     new_orders: Arc<DashMap<String, OrderData>>,
     // map of order hashes that are currently being processed (routed/executed)
     processing_orders: Arc<DashMap<String, OrderData>>,
@@ -190,8 +211,6 @@ impl UniswapXPriorityFill {
         receiver: Receiver<RoutedOrder>,
         chain_id: u64,
     ) -> Self {
-        info!("syncing state");
-
         Self {
             client,
             cloudwatch_client,
@@ -213,17 +232,15 @@ impl UniswapXPriorityFill {
 #[async_trait]
 impl Strategy<Event, Action> for UniswapXPriorityFill {
     async fn sync_state(&mut self) -> Result<()> {
-        info!("syncing state");
-
         Ok(())
     }
 
-    // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
+    /// Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks
     async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::UniswapXOrder(order) => self.process_order_event(&order).await,
+            Event::Order(order) => self.process_order_event(&order).await,
             Event::NewBlock(block) => self.process_new_block_event(&block).await,
-            Event::UniswapXRoute(route) => self.process_new_route(&route).await,
+            Event::RoutedOrder(route) => self.process_new_route(&route).await,
         }
     }
 }
@@ -250,9 +267,9 @@ impl UniswapXPriorityFill {
         } else {
             encoded_order
         };
-        
-        let order_hex = hex::decode(encoded_order)
-            .map_err(|e| format!("Failed to decode hex: {}", e))?;
+
+        let order_hex =
+            hex::decode(encoded_order).map_err(|e| format!("Failed to decode hex: {}", e))?;
 
         PriorityOrder::decode_inner(&order_hex, false)
             .map_err(|e| format!("Failed to decode order: {}", e).into())
@@ -263,19 +280,20 @@ impl UniswapXPriorityFill {
             *self.last_block_number.read().await,
             *self.last_block_timestamp.read().await,
             get_block_time_ms(self.chain_id),
-            Uint::from(0),
-            self.min_block_percentage_buffer.unwrap_or(100)
+            Uint::from(PRIORITY_FEE_WEI),
+            self.min_block_percentage_buffer
+                .unwrap_or(MIN_BLOCK_PERCENTAGE_BUFFER_DEFAULT),
         );
-        let order_status = match resolved_order {
+
+        match resolved_order {
             OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
             OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
             OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
-        };
-        order_status
+        }
     }
 
     /// Process new order events that we fetch from UniswapX API
-    /// - skip if we are already tracking this order
+    /// - skip if no block has been received yet, or we are already tracking/processing this order
     /// - otherwise decode and process:
     ///     - skip if we have already processed this order
     ///     - immediately send for execution if order is fillable
@@ -288,6 +306,7 @@ impl UniswapXPriorityFill {
             );
             return self.check_orders_for_submission().await;
         }
+
         if self.new_orders.contains_key(&event.order_hash)
             || self.processing_orders.contains_key(&event.order_hash)
         {
@@ -301,7 +320,6 @@ impl UniswapXPriorityFill {
         let order = self
             .decode_order(&event.encoded_order)
             .map_err(|e| error!("failed to decode: {}", e))
-            .ok()
             .unwrap();
 
         let order_hash = event.order_hash.clone();
@@ -318,6 +336,7 @@ impl UniswapXPriorityFill {
                     );
                     return self.check_orders_for_submission().await;
                 }
+
                 let order_data = OrderData {
                     order: Order::PriorityOrder(order.clone()),
                     hash: order_hash.clone(),
@@ -326,30 +345,45 @@ impl UniswapXPriorityFill {
                     encoded_order: None,
                     route: event.route.clone(),
                 };
-                info!("{} - Received {} order", order_hash, if order_data.order.is_exact_output() { "exact_out" } else { "exact_in" });
+
+                info!(
+                    "{} - Received {} order",
+                    order_hash,
+                    if order_data.order.is_exact_output() {
+                        "exact_out"
+                    } else {
+                        "exact_in"
+                    }
+                );
+
                 if let Some(route) = &order_data.route {
                     if !route.method_parameters.calldata.is_empty() {
-                        info!("{} - Received cached route for order with quote: {}", order_hash, route.quote);
+                        info!(
+                            "{} - Received cached route for order with quote: {}",
+                            order_hash, route.quote
+                        );
                     }
                 }
+
                 if let Some(cw) = &self.cloudwatch_client {
                     let metric_future = cw
                         .put_metric_data()
                         .namespace(ARTEMIS_NAMESPACE)
                         .metric_data(
                             MetricBuilder::new(CwMetrics::OrderReceived(self.chain_id))
-                                .add_dimension(DimensionName::Service.as_ref(), DimensionValue::PriorityExecutor.as_ref())
+                                .add_dimension(
+                                    DimensionName::Service.as_ref(),
+                                    DimensionValue::PriorityExecutor.as_ref(),
+                                )
                                 .with_value(1.0)
                                 .build(),
                         )
                         .send();
-                    tokio::spawn(async move {
-                        if let Err(e) = metric_future.await {
-                            warn!("Error sending order received metric: {:?}", e);
-                        }
-                    });
+                    send_metric!(metric_future);
                 }
-                self.new_orders.insert(order_hash.clone(), order_data.clone());
+
+                self.new_orders
+                    .insert(order_hash.clone(), order_data.clone());
 
                 info!(
                     "{} - Route new order at block {}; target: {}",
@@ -358,11 +392,10 @@ impl UniswapXPriorityFill {
                     order.cosignerData.auctionTargetBlock
                 );
                 let order_batch = self.get_order_batch(&order_data);
-                self.try_route_order_batch(order_batch, order_hash)
-                    .await;
+                self.try_route_order_batch(order_batch, order_hash).await;
             }
         }
-        return self.check_orders_for_submission().await
+        return self.check_orders_for_submission().await;
     }
 
     async fn process_new_route(&mut self, event: &RoutedOrder) -> Vec<Action> {
@@ -370,7 +403,7 @@ impl UniswapXPriorityFill {
             .request
             .orders
             .iter()
-            .any(|o: &OrderData| self.done_orders.contains_key(&o.hash))
+            .any(|o| self.done_orders.contains_key(&o.hash))
         {
             info!(
                 "{} - Skipping route with done order",
@@ -399,7 +432,8 @@ impl UniswapXPriorityFill {
                     _ => continue,
                 };
 
-                if let OrderStatus::NotFillableYet(_) = self.get_order_status(resolved_order).await {
+                if let OrderStatus::NotFillableYet(_) = self.get_order_status(resolved_order).await
+                {
                     let order_batch = self.get_order_batch(entry.value());
                     self.try_route_order_batch(order_batch, order.hash.clone())
                         .await;
@@ -413,7 +447,7 @@ impl UniswapXPriorityFill {
         }
 
         // Try to submit the order and return any actions
-        return self.check_orders_for_submission().await
+        return self.check_orders_for_submission().await;
     }
 
     /// Process new block events
@@ -457,11 +491,7 @@ impl UniswapXPriorityFill {
                             .build(),
                     )
                     .send();
-                tokio::spawn(async move {
-                    if let Err(e) = metric_future.await {
-                        warn!("Error sending block metric: {:?}", e);
-                    }
-                });
+                send_metric!(metric_future);
             }
         }
 
@@ -489,18 +519,27 @@ impl UniswapXPriorityFill {
 
     fn get_order_batch(&self, order_data: &OrderData) -> OrderBatchData {
         let amount_in: Uint<256, 4> = order_data.resolved.input.amount;
-        info!("{} - outputs: {:?}", order_data.hash, order_data.resolved.outputs);
+        info!(
+            "{} - outputs: {:?}",
+            order_data.hash, order_data.resolved.outputs
+        );
+
         let amount_out = order_data
             .resolved
             .outputs
             .iter()
             .fold(Uint::from(0), |sum, output| sum.wrapping_add(output.amount));
         info!("{} - amount_out: {:?}", order_data.hash, amount_out);
+
         OrderBatchData {
             orders: vec![order_data.clone()],
             amount_in,
             amount_out,
-            amount_required: if order_data.order.is_exact_output() { amount_in } else { amount_out },
+            amount_required: if order_data.order.is_exact_output() {
+                amount_in
+            } else {
+                amount_out
+            },
             token_in: normalize_erc20eth_to_native(&order_data.resolved.input.token),
             token_out: order_data.resolved.outputs[0].token.clone(), // No normalization needed (ERC20ETH won't be output)
             chain_id: self.chain_id,
@@ -508,7 +547,7 @@ impl UniswapXPriorityFill {
     }
 
     async fn handle_fills(&self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = PRIORITY_ORDER_REACTOR_ADDRESS.parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(*self.last_block_number.read().await)
             .address(reactor_address)
@@ -529,36 +568,41 @@ impl UniswapXPriorityFill {
             self.processing_orders.remove(&order_hash);
             self.done_orders.insert(
                 order_hash.to_string(),
-                self.current_timestamp()? + DONE_EXPIRY,
+                self.current_timestamp() + DONE_EXPIRY,
             );
         }
         Ok(())
     }
 
-    /// The profit of a priority order is calculated a bit differently
-    /// Rationale:
-    ///     - we will always bid the base fee
-    ///     - since we have to provide 1 MP (1/1000th of a bp) for every wei of priority fee
-    ///     - we return the data needed to calculate the maximum MPS of improvement we can offer from our quote and the order specs
-    fn get_execution_metadata(
-        &self,
-        routed_order: &RoutedOrder,
-    ) -> Option<ExecutionMetadata> {
+    /// The profit of a priority order is calculated as follows:
+    ///
+    /// - we will always bid the base fee
+    /// - since we have to provide 1 MP, i.e. 1/1000th of a basis point (bp), for every wei of priority fee
+    /// - we return the data needed to calculate the maximum MPS of improvement we can offer from our quote and the order specs
+    fn get_execution_metadata(&self, routed_order: &RoutedOrder) -> Option<ExecutionMetadata> {
         let quote = U256::from_str_radix(&routed_order.route.quote, 10).ok()?;
         let amount_required =
             U256::from_str_radix(&routed_order.request.amount_required.to_string(), 10).ok()?;
-        info!("{} - quote_eth: {:?}", routed_order.request.orders[0].hash, self.get_quote_eth(&routed_order));
-        Some({
-            ExecutionMetadata {
-                quote,
-                quote_eth: self.get_quote_eth(&routed_order),
-                exact_output: routed_order.request.orders[0].order.is_exact_output(),
-                amount_required,
-                gas_use_estimate_quote: U256::from_str_radix(&routed_order.route.gas_use_estimate_quote, 10).ok()?,
-                order_hash: routed_order.request.orders[0].hash.clone(),
-                target_block: routed_order.target_block.map(|b| U64::from(b)),
-                fallback_bid_scale_factor: self.fallback_bid_scale_factor.clone(),
-            }
+        let quote_eth = self.get_quote_eth(routed_order);
+
+        info!(
+            "{} - quote_eth: {:?}",
+            routed_order.request.orders[0].hash, quote_eth
+        );
+
+        Some(ExecutionMetadata {
+            quote,
+            quote_eth,
+            exact_output: routed_order.request.orders[0].order.is_exact_output(),
+            amount_required,
+            gas_use_estimate_quote: U256::from_str_radix(
+                &routed_order.route.gas_use_estimate_quote,
+                10,
+            )
+            .ok()?,
+            order_hash: routed_order.request.orders[0].hash.clone(),
+            target_block: routed_order.target_block.map(U64::from),
+            fallback_bid_scale_factor: self.fallback_bid_scale_factor,
         })
     }
 
@@ -577,11 +621,14 @@ impl UniswapXPriorityFill {
 
         match order_status {
             OrderStatus::Done => {
-                info!("{} - Order is done, removing from new_orders and processing_orders", order_hash);
+                info!(
+                    "{} - Order is done, removing from new_orders and processing_orders",
+                    order_hash
+                );
                 self.new_orders.remove(&order_hash);
                 self.processing_orders.remove(&order_hash);
                 self.done_orders
-                    .insert(order_hash, self.current_timestamp()? + DONE_EXPIRY);
+                    .insert(order_hash, self.current_timestamp() + DONE_EXPIRY);
             }
             OrderStatus::NotFillableYet(resolved_order) | OrderStatus::Open(resolved_order) => {
                 let order_data = OrderData {
@@ -590,15 +637,11 @@ impl UniswapXPriorityFill {
                     signature: signature.to_string(),
                     resolved: resolved_order,
                     encoded_order: None,
-                    route: route,
+                    route,
                 };
-                info!(
-                    "{} - Requesting fresh route for order",
-                    order_hash
-                );
+                info!("{} - Requesting fresh route for order", order_hash);
                 let order_batch = self.get_order_batch(&order_data);
-                self.try_route_order_batch(order_batch, order_hash)
-                    .await;
+                self.try_route_order_batch(order_batch, order_hash).await;
             }
         }
 
@@ -607,15 +650,8 @@ impl UniswapXPriorityFill {
 
     async fn prune_done_orders(&mut self) {
         info!("Pruning done orders");
-        let mut to_remove = Vec::new();
-        for item in self.done_orders.iter() {
-            if *item.value() < *self.last_block_timestamp.read().await {
-                to_remove.push(item.key().clone());
-            }
-        }
-        for order_hash in to_remove {
-            self.done_orders.remove(&order_hash);
-        }
+        let last_ts = *self.last_block_timestamp.read().await;
+        self.done_orders.retain(|_, v| *v >= last_ts);
     }
 
     /// check all new orders we are tracking
@@ -625,7 +661,7 @@ impl UniswapXPriorityFill {
             .new_orders
             .iter()
             .map(|entry| entry.key().clone())
-            .collect::<Vec<String>>();
+            .collect::<Vec<_>>();
 
         for order_hash in order_hashes {
             if let Some(order_data) = self.get_new_order(&order_hash) {
@@ -651,27 +687,26 @@ impl UniswapXPriorityFill {
         }
 
         // After processing orders, check if any can be submitted
-        return self.check_orders_for_submission().await
+        return self.check_orders_for_submission().await;
     }
 
-    async fn try_route_order_batch(
-        &self,
-        order_batch: OrderBatchData,
-        order_hash: String,
-    ) {
-        match self.batch_sender.send(vec![order_batch]).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!(
-                    "{} - Failed to send batch: {}",
-                    order_hash, e
-                );
-            }
+    async fn try_route_order_batch(&self, order_batch: OrderBatchData, order_hash: String) {
+        if let Err(e) = self.batch_sender.send(vec![order_batch]).await {
+            error!("{} - Failed to send batch: {}", order_hash, e);
         }
     }
 
+    /// Iterates over every new priority order that has been routed
+    ///
+    /// - Skip routes that are processing
+    /// - Evaluate order status
+    ///   - Skip if not fillable yet
+    ///   - Remove order if it was completed
+    ///   - If order is ready, place fill transaction
+    ///   - If the metadata cannot be determined, clear the route information and try re-routing
     async fn check_orders_for_submission(&self) -> Vec<Action> {
-        let order_hashes: Vec<String> = self.new_orders
+        let order_hashes: Vec<String> = self
+            .new_orders
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
@@ -681,69 +716,94 @@ impl UniswapXPriorityFill {
         for order_hash in order_hashes {
             if let Some(mut order_data) = self.new_orders.get_mut(&order_hash) {
                 // Skip if no route available
-                if order_data.route.as_ref().map_or(true, |r| r.method_parameters.calldata.is_empty()) {
+                if order_data
+                    .route
+                    .as_ref()
+                    .is_none_or(|r| r.method_parameters.calldata.is_empty())
+                {
                     debug!("{} - No route available, skipping", order_hash);
                     continue;
                 }
+
                 // skip if order is already in processing_orders
                 if self.processing_orders.contains_key(&order_hash) {
-                    debug!("{} - Order is already in processing_orders, skipping", order_hash);
+                    debug!(
+                        "{} - Order is already in processing_orders, skipping",
+                        order_hash
+                    );
                     continue;
                 }
 
-                // Check if order is now fillable
                 let order = match &order_data.order {
                     Order::PriorityOrder(order) => order,
                     _ => continue,
                 };
 
+                // Check if order is now fillable
                 match self.get_order_status(order).await {
                     OrderStatus::Done => {
-                        info!("{} - Order is done, removing from new_orders and processing_orders", order_hash);
+                        info!(
+                            "{} - Order is done, removing from new_orders and processing_orders",
+                            order_hash
+                        );
                         self.new_orders.remove(&order_hash);
                         self.processing_orders.remove(&order_hash);
-                        self.done_orders.insert(
-                            order_hash,
-                            self.current_timestamp().unwrap_or(0) + DONE_EXPIRY,
-                        );
+                        self.done_orders
+                            .insert(order_hash, self.current_timestamp() + DONE_EXPIRY);
                         continue;
                     }
+
                     OrderStatus::NotFillableYet(_) => {
                         debug!("{} - Order is not fillable yet, skipping", order_hash);
                         continue;
                     }
+
                     OrderStatus::Open(_) => {
-                        debug!("{} - Order is open, adding to processing_orders", order_hash);
+                        assert!(order_data.route.is_some());
+
+                        debug!(
+                            "{} - Order is open, adding to processing_orders",
+                            order_hash
+                        );
                         // if already in processing_orders, skip (prevent race condition)
                         if self.processing_orders.contains_key(&order_hash) {
                             continue;
-                        }
-                        else {
-                            self.processing_orders.insert(order_hash.clone(), order_data.value().clone());
+                        } else {
+                            self.processing_orders
+                                .insert(order_hash.clone(), order_data.value().clone());
                         }
 
                         // If EXACT_OUT, quote should be less than amount_required
-                        let quote = U256::from_str_radix(&order_data.route.as_ref().unwrap().quote, 10).unwrap();
-                        if order_data.order.is_exact_output() && quote.ge(&order_data.resolved.input.amount) {
+                        let quote =
+                            U256::from_str_radix(&order_data.route.as_ref().unwrap().quote, 10)
+                                .unwrap();
+                        if order_data.order.is_exact_output()
+                            && quote.ge(&order_data.resolved.input.amount)
+                        {
                             info!("{} - Quote indicates more input than swapper is willing to give, skipping", order_hash);
                             continue;
                         }
                         // If EXACT_IN, quote should be greater than amount_required
-                        else if !order_data.order.is_exact_output() && quote.le(&order_data.resolved.outputs[0].amount) {
+                        else if !order_data.order.is_exact_output()
+                            && quote.le(&order_data.resolved.outputs[0].amount)
+                        {
                             info!("{} - Quote indicates less output than swapper is willing to receive, skipping", order_hash);
                             continue;
                         }
 
                         let routed_order = RoutedOrder {
                             request: self.get_order_batch(order_data.value()),
-                            route: OrderRoute {
-                                quote: order_data.route.as_ref().unwrap().quote.clone(),
-                                quote_gas_adjusted: order_data.route.as_ref().unwrap().quote_gas_adjusted.clone(),
-                                gas_price_wei: order_data.route.as_ref().unwrap().gas_price_wei.clone(),
-                                gas_use_estimate_quote: order_data.route.as_ref().unwrap().gas_use_estimate_quote.clone(),
-                                gas_use_estimate: order_data.route.as_ref().unwrap().gas_use_estimate.clone(),
-                                route: vec![],
-                                method_parameters: order_data.route.as_ref().unwrap().method_parameters.clone(),
+                            route: {
+                                let route = order_data.route.as_ref().unwrap();
+                                OrderRoute {
+                                    quote: route.quote.clone(),
+                                    quote_gas_adjusted: route.quote_gas_adjusted.clone(),
+                                    gas_price_wei: route.gas_price_wei.clone(),
+                                    gas_use_estimate_quote: route.gas_use_estimate_quote.clone(),
+                                    gas_use_estimate: route.gas_use_estimate.clone(),
+                                    route: vec![],
+                                    method_parameters: route.method_parameters.clone(),
+                                }
                             },
                             target_block: Some(order.cosignerData.auctionTargetBlock),
                         };
@@ -753,12 +813,16 @@ impl UniswapXPriorityFill {
                             order_hash
                         );
 
-                        match self.build_fill(
-                            self.client.clone(),
-                            &self.executor_address,
-                            self.get_signed_orders(vec![order_data.value().clone()]).unwrap(),
-                            &routed_order,
-                        ).await {
+                        match self
+                            .build_fill(
+                                self.client.clone(),
+                                &self.executor_address,
+                                self.get_signed_orders(vec![order_data.value().clone()])
+                                    .unwrap(),
+                                &routed_order,
+                            )
+                            .await
+                        {
                             Ok(fill_tx_request) => {
                                 debug!("{} - Successfully built fill transaction", order_hash);
                                 let metadata = self.get_execution_metadata(&routed_order);
@@ -778,13 +842,17 @@ impl UniswapXPriorityFill {
                                             },
                                         );
                                         actions.push(action);
-                                        info!("{} - Successfully queued transaction for submission", order_hash);
+                                        info!(
+                                            "{} - Successfully queued transaction for submission",
+                                            order_hash
+                                        );
                                     }
+
                                     None => {
                                         // Clear the route and refresh
                                         order_data.value_mut().route = None;
                                         // Refresh route and try again
-                                        let order_batch = self.get_order_batch(&order_data.value());
+                                        let order_batch = self.get_order_batch(order_data.value());
                                         self.try_route_order_batch(order_batch, order_hash.clone())
                                             .await;
                                         info!(
@@ -796,6 +864,7 @@ impl UniswapXPriorityFill {
                                     }
                                 }
                             }
+
                             Err(e) => {
                                 error!("{} - Error building fill transaction: {}", order_hash, e);
                                 continue;
@@ -814,21 +883,20 @@ impl UniswapXPriorityFill {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_calculate_priority_fee_exact_in() {
         // Test case 1: Normal case with profit
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),  // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let bid_bps = U128::from(5000); // 50%
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_some());
@@ -839,46 +907,46 @@ mod tests {
 
         // Test case 2: Quote equals amount required (no profit)
         let metadata = ExecutionMetadata::new(
-            U256::from(800),   // quote equals amount_out_required
-            Some(U256::from(800)),   // quote_eth
+            U256::from(800),       // quote equals amount_out_required
+            Some(U256::from(800)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_none());
 
         // Test case 3: Quote less than amount required
         let metadata = ExecutionMetadata::new(
-            U256::from(700),   // quote less than amount_out_required
-            Some(U256::from(700)),   // quote_eth
+            U256::from(700),       // quote less than amount_out_required
+            Some(U256::from(700)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_none());
 
         // Test case 4: Minimal profit case
         let metadata = ExecutionMetadata::new(
-            U256::from(801),   // quote just above amount_out_required
-            Some(U256::from(801)),   // quote_eth
+            U256::from(801),       // quote just above amount_out_required
+            Some(U256::from(801)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_some());
         // profit = 1
@@ -888,37 +956,36 @@ mod tests {
 
         // Test case 5: Zero bid_bps
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),  // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let zero_bid_bps = U128::from(0);
         let result = metadata.calculate_priority_fee(zero_bid_bps);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), U256::from(0));
     }
 
-
     #[test]
     fn test_calculate_priority_fee_exact_out() {
         // Test case 1: Normal case with profit
         let metadata = ExecutionMetadata::new(
-            U256::from(800),   // quote
-            Some(U256::from(800)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800),       // quote
+            Some(U256::from(800)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(50),        // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let bid_bps = U128::from(5000); // 50%
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_some());
@@ -929,46 +996,46 @@ mod tests {
 
         // Test case 2: Quote equals amount required (no profit)
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote equals amount_in_required
-            Some(U256::from(1000)),  // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(1000),       // quote equals amount_in_required
+            Some(U256::from(1000)), // quote_eth
+            true,                   // exact_output = true
+            U256::from(1000),       // amount_in_required
+            U256::from(50),         // gas_use_estimate_quote
             "test_hash",
             None,
-            None
+            None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_none());
 
         // Test case 3: Quote greater than amount required
         let metadata = ExecutionMetadata::new(
-            U256::from(1100),  // quote greater than amount_in_required
-            Some(U256::from(1100)),  // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(1100),       // quote greater than amount_in_required
+            Some(U256::from(1100)), // quote_eth
+            true,                   // exact_output = true
+            U256::from(1000),       // amount_in_required
+            U256::from(50),         // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_none());
 
         // Test case 4: Minimal profit case
         let metadata = ExecutionMetadata::new(
-            U256::from(999),   // quote just below amount_in_required
-            Some(U256::from(999)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(999),       // quote just below amount_in_required
+            Some(U256::from(999)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(50),        // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let result = metadata.calculate_priority_fee(bid_bps);
         assert!(result.is_some());
         // profit = 1
@@ -978,16 +1045,16 @@ mod tests {
 
         // Test case 5: Zero bid_bps
         let metadata = ExecutionMetadata::new(
-            U256::from(800),   // quote
-            Some(U256::from(800)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800),       // quote
+            Some(U256::from(800)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(50),        // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         let zero_bid_bps = U128::from(0);
         let result = metadata.calculate_priority_fee(zero_bid_bps);
         assert!(result.is_some());
@@ -998,16 +1065,16 @@ mod tests {
     fn test_calculate_priority_fee_from_gas_use_estimate_exact_in() {
         // Test case 1: Normal case with profit
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),  // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(50),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 2x
         let mut gas_buffer = U256::from(2);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1018,34 +1085,33 @@ mod tests {
 
         // Test case 2: No profit after gas and required amount
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),   // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(100),   // amount_out_required
-            U256::from(1000000000),  // gas_use_estimate_quote
+            U256::from(100),        // amount_out_required
+            U256::from(1000000000), // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
         assert!(result.is_none());
 
-
         // Test case 3: 1 profit after gas and required amount
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),   // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(900),   // amount_out_required
-            U256::from(99),   // gas_use_estimate_quote
+            U256::from(900), // amount_out_required
+            U256::from(99),  // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1056,16 +1122,16 @@ mod tests {
 
         // Test case 4: Quote less than required amount plus gas
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),   // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(900),   // amount_out_required
-            U256::from(200),   // gas_use_estimate_quote
+            U256::from(900), // amount_out_required
+            U256::from(200), // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x (900 + 200 > 1000)
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1073,16 +1139,16 @@ mod tests {
 
         // Test case 5: Edge case with zero gas estimate
         let metadata = ExecutionMetadata::new(
-            U256::from(1000),  // quote
-            Some(U256::from(1000)),   // quote_eth
+            U256::from(1000),       // quote
+            Some(U256::from(1000)), // quote_eth
             false,
-            U256::from(800),   // amount_out_required
-            U256::from(0),     // gas_use_estimate_quote
+            U256::from(800), // amount_out_required
+            U256::from(0),   // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 2x
         gas_buffer = U256::from(2);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1096,16 +1162,16 @@ mod tests {
     fn test_calculate_priority_fee_from_gas_use_estimate_exact_out() {
         // Test case 1: Normal case with profit
         let metadata = ExecutionMetadata::new(
-            U256::from(800),   // quote
-            Some(U256::from(800)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(50),    // gas_use_estimate_quote
+            U256::from(800),       // quote
+            Some(U256::from(800)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(50),        // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 2x
         let mut gas_buffer = U256::from(2);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1116,16 +1182,16 @@ mod tests {
 
         // Test case 2: No profit after gas and required amount
         let metadata = ExecutionMetadata::new(
-            U256::from(999),    // quote just below required
-            Some(U256::from(999)),    // quote_eth
-            true,               // exact_output = true
-            U256::from(1000),   // amount_in_required
-            U256::from(2),      // gas_use_estimate_quote
+            U256::from(999),       // quote just below required
+            Some(U256::from(999)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(2),         // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x (999 > 1000 - 2)
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1133,16 +1199,16 @@ mod tests {
 
         // Test case 3: 1 wei profit after gas and required amount
         let metadata = ExecutionMetadata::new(
-            U256::from(900),   // quote
-            Some(U256::from(900)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(99),   // gas_use_estimate_quote
+            U256::from(900),       // quote
+            Some(U256::from(900)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(99),        // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x (900 < 1000 - 99)
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1153,16 +1219,16 @@ mod tests {
 
         // Test case 4: Quote greater than required amount minus gas
         let metadata = ExecutionMetadata::new(
-            U256::from(900),   // quote
-            Some(U256::from(900)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(200),   // gas_use_estimate_quote
+            U256::from(900),       // quote
+            Some(U256::from(900)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(200),       // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 1x (900 > 1000 - 200)
         gas_buffer = U256::from(1);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);
@@ -1170,16 +1236,16 @@ mod tests {
 
         // Test case 5: Edge case with zero gas estimate
         let metadata = ExecutionMetadata::new(
-            U256::from(800),   // quote
-            Some(U256::from(800)),   // quote_eth
-            true,              // exact_output = true
-            U256::from(1000),  // amount_in_required
-            U256::from(0),     // gas_use_estimate_quote
+            U256::from(800),       // quote
+            Some(U256::from(800)), // quote_eth
+            true,                  // exact_output = true
+            U256::from(1000),      // amount_in_required
+            U256::from(0),         // gas_use_estimate_quote
             "test_hash",
             None,
             None,
         );
-        
+
         // With gas buffer of 2x
         gas_buffer = U256::from(2);
         let result = metadata.calculate_priority_fee_from_gas_use_estimate(gas_buffer);

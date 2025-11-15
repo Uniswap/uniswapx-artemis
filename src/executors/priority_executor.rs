@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use tracing::{info, warn, debug};
+use std::{future::Future, pin::Pin};
+use tracing::{debug, info, warn};
 
 use alloy::{
     eips::{BlockId, BlockNumberOrTag},
@@ -18,20 +19,25 @@ use uniswapx_rs::order::BPS;
 
 use crate::{
     aws_utils::cloudwatch_utils::{
-        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue
-    }, 
+        build_metric_future, receipt_status_to_metric, CwMetrics, DimensionValue,
+    },
     executors::{
         bundle_client::BundleClient,
-        transaction_utils::{poll_for_receipt, process_receipt, handle_send_error, TransactionOutcome},
+        transaction_utils::{
+            handle_send_error, poll_for_receipt, process_receipt, TransactionOutcome,
+        },
     },
     shared::{get_nonce_with_retry, send_metric_with_order_hash, u256},
-    strategies::{keystore::KeyStore, types::SubmitTxToMempoolWithExecutionMetadata}
+    strategies::{keystore::KeyStore, types::SubmitTxToMempoolWithExecutionMetadata},
 };
 
 const GAS_LIMIT: u64 = 1_000_000;
 const MAX_RETRIES: u32 = 3;
 const TX_BACKOFF_MS: u64 = 0; // retry immediately
+
+/// Factor to multiply the gas use estimate by
 static QUOTE_BASED_PRIORITY_BID_BUFFER: U256 = u256!(2);
+
 static GWEI_PER_ETH: U256 = u256!(1_000_000_000);
 const QUOTE_ETH_LOG10_THRESHOLD: usize = 8;
 // The number of bps to add to the base bid for each fallback bid
@@ -41,7 +47,7 @@ const RECEIPT_POLL_INTERVAL_MS: u64 = 250;
 // The number of blocks past the target block the bundle is valid for
 const TARGET_BLOCK_BUNDLE_WINDOW: u64 = 4;
 
-const UNICHAIN_ID: u64 = 130;
+pub const UNICHAIN_ID: u64 = 130;
 
 /// An executor that sends transactions to the public mempool.
 pub struct PriorityExecutor {
@@ -78,10 +84,12 @@ impl PriorityExecutor {
         if let Some(cloudwatch_client) = &self.cloudwatch_client {
             let metric = match outcome {
                 Ok(TransactionOutcome::Success(_)) => CwMetrics::TxSucceeded(chain_id),
-                Ok(TransactionOutcome::Failure(_)) | Ok(TransactionOutcome::RetryableFailure) => CwMetrics::TxReverted(chain_id),
+                Ok(TransactionOutcome::Failure(_)) | Ok(TransactionOutcome::RetryableFailure) => {
+                    CwMetrics::TxReverted(chain_id)
+                }
                 Err(_) => CwMetrics::TxStatusUnknown(chain_id),
             };
-            
+
             let metric_future = build_metric_future(
                 Some(cloudwatch_client.clone()),
                 DimensionValue::PriorityExecutor,
@@ -105,22 +113,27 @@ impl PriorityExecutor {
         let tx_request_for_revert = tx_request.clone();
         let tx_envelope = tx_request.build(wallet).await?;
         info!("{} - Sending transaction to RPC", order_hash);
-        
-        match self.sender_client.send_tx_envelope(tx_envelope.clone()).await {
+
+        match self
+            .sender_client
+            .send_tx_envelope(tx_envelope.clone())
+            .await
+        {
             Ok(tx) => {
                 info!("{} - Waiting for confirmations", order_hash);
                 let receipt = match tokio::time::timeout(
                     std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC),
-                    tx.with_required_confirmations(0).get_receipt()
-                ).await {
+                    tx.with_required_confirmations(0).get_receipt(),
+                )
+                .await
+                {
                     Ok(receipt_result) => receipt_result.ok(),
                     Err(_) => {
                         warn!("{} - Timed out waiting for transaction receipt", order_hash);
                         return Ok(TransactionOutcome::Failure(None));
                     }
                 };
-                
-                // Process receipt
+
                 process_receipt(
                     receipt,
                     &self.client,
@@ -129,14 +142,22 @@ impl PriorityExecutor {
                     chain_id,
                     target_block,
                     self.cloudwatch_client.clone(),
-                ).await
+                )
+                .await
             }
             Err(e) => {
-                handle_send_error(e.into(), &self.sender_client, wallet, &tx_request_for_revert, order_hash).await
+                handle_send_error(
+                    e.into(),
+                    &self.sender_client,
+                    wallet,
+                    &tx_request_for_revert,
+                    order_hash,
+                )
+                .await
             }
         }
     }
-    
+
     async fn send_bundle(
         &self,
         wallet: &EthereumWallet,
@@ -146,30 +167,54 @@ impl PriorityExecutor {
         target_block: u64,
     ) -> Result<TransactionOutcome> {
         let tx_request_for_revert = tx_request.clone();
-        
+
         // Send bundle using bundle client
-        let (tx_envelope, _bundle_hash) = match self.bundle_client
-            .send_bundle(wallet, tx_request, target_block, TARGET_BLOCK_BUNDLE_WINDOW, order_hash)
-            .await {
-                Ok(result) => result,
-                Err(e) => {
-                    return handle_send_error(e, &self.sender_client, wallet, &tx_request_for_revert, order_hash).await;
-                }
-            };
-        
+        let (tx_envelope, _bundle_hash) = match self
+            .bundle_client
+            .send_bundle(
+                wallet,
+                tx_request,
+                target_block,
+                TARGET_BLOCK_BUNDLE_WINDOW,
+                order_hash,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                return handle_send_error(
+                    e,
+                    &self.sender_client,
+                    wallet,
+                    &tx_request_for_revert,
+                    order_hash,
+                )
+                .await;
+            }
+        };
+
         // Poll for transaction receipt
         let receipt = match tokio::time::timeout(
             std::time::Duration::from_secs(CONFIRMATION_TIMEOUT_SEC),
-            poll_for_receipt(&self.sender_client, &self.client, &tx_envelope, target_block, order_hash, CONFIRMATION_TIMEOUT_SEC, RECEIPT_POLL_INTERVAL_MS)
-        ).await {
+            poll_for_receipt(
+                &self.sender_client,
+                &self.client,
+                &tx_envelope,
+                target_block,
+                order_hash,
+                CONFIRMATION_TIMEOUT_SEC,
+                RECEIPT_POLL_INTERVAL_MS,
+            ),
+        )
+        .await
+        {
             Ok(receipt_result) => receipt_result?,
             Err(_) => {
                 warn!("{} - Timed out waiting for transaction receipt", order_hash);
                 return Ok(TransactionOutcome::Failure(None));
             }
         };
-        
-        // Process receipt
+
         process_receipt(
             receipt,
             &self.client,
@@ -178,9 +223,12 @@ impl PriorityExecutor {
             chain_id,
             Some(target_block),
             self.cloudwatch_client.clone(),
-        ).await
+        )
+        .await
     }
 
+    /// Calculates a primary bid and at least 3 fallback bids. Additional bids
+    /// are added based on the quote's magnitude
     fn get_bids_for_order(
         &self,
         action: &SubmitTxToMempoolWithExecutionMetadata,
@@ -193,21 +241,32 @@ impl PriorityExecutor {
             let quote_based_priority_bid = action
                 .metadata
                 .calculate_priority_fee_from_gas_use_estimate(QUOTE_BASED_PRIORITY_BID_BUFFER);
+
             if let Some(bid) = quote_based_priority_bid {
                 bid_priority_fees.push(Some(bid));
                 debug!("{} - quote_based_priority_bid: {:?}", order_hash, bid);
             }
         }
 
-        // If the quote is large in ETH, add more bids
-        // < 1e5 gwei = 1 fallback bid, 1e6 = 2 fallback bids, 1e7 = 3 fallback bids, etc.
+        // If the quote is large in ETH, add more bids based on the quote's magnitude in gwei
+        //
+        // num_fallback_bids = 3 + max(0, log10(quote_in_gwei) - QUOTE_ETH_LOG10_THRESHOLD)
+        //
+        // For QUOTE_ETH_LOG10_THRESHOLD = 8:
+        //
+        // | Quote (in ETH) | Quote (in Gwei) | log₁₀(Gwei) | Extra bids |
+        // +----------------+-----------------+-------------+------------+
+        // | 0.1 ETH        | 1e8             | 8           | 0          |
+        // | 1 ETH          | 1e9             | 9           | 1          |
+        // | 10 ETH         | 1e10            | 10          | 2          |
+        // | 100 ETH        | 1e11            | 11          | 3          |
         let mut num_fallback_bids = 3;
         if let Some(quote_eth) = action.metadata.quote_eth {
             if quote_eth > U256::from(0) {
                 debug!("{} - Adding fallback bids based on quote size", order_hash);
-                let quote_in_gwei = &quote_eth / GWEI_PER_ETH;
+                let quote_in_gwei = quote_eth / GWEI_PER_ETH;
                 debug!("{} - quote_eth_gwei: {:?}", order_hash, quote_in_gwei);
-                
+
                 if quote_in_gwei > U256::from(0) {
                     let quote_gwei_log10 = quote_in_gwei.log10();
                     debug!("{} - quote_gwei_log10: {:?}", order_hash, quote_gwei_log10);
@@ -223,17 +282,18 @@ impl PriorityExecutor {
         // 9950, 9900, 9800, 9600, 9200, ...
         for i in 0..num_fallback_bids {
             // Check if the shift would cause overflow or if the result would be negative
-            let bid_scale_factor = action.metadata.fallback_bid_scale_factor.unwrap_or(DEFAULT_FALLBACK_BID_SCALE_FACTOR);
+            let bid_scale_factor = action
+                .metadata
+                .fallback_bid_scale_factor
+                .unwrap_or(DEFAULT_FALLBACK_BID_SCALE_FACTOR);
             let bid_reduction = U128::from(bid_scale_factor * (1 << i));
             if bid_reduction >= U128::from(BPS) {
                 // Stop generating more fallback bids
                 break;
             }
-            
+
             let bid_bps = U128::from(BPS) - bid_reduction;
-            let fallback_bid = action
-                .metadata
-                .calculate_priority_fee(bid_bps);
+            let fallback_bid = action.metadata.calculate_priority_fee(bid_bps);
             if let Some(bid) = fallback_bid {
                 bid_priority_fees.push(Some(bid));
                 debug!("{} - fallback_bid_{}: {:?}", order_hash, i, bid);
@@ -250,13 +310,13 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
     async fn execute(&self, mut action: SubmitTxToMempoolWithExecutionMetadata) -> Result<()> {
         info!("{} - Executing transaction", action.metadata.order_hash);
         let order_hash = Arc::new(action.metadata.order_hash.clone());
-        
+
         // Initialize this variable outside the main logic so we can access it in the cleanup section
         let mut public_address = None;
-        
+
         // Use a closure to handle the main logic with ? operator for early returns
         let result = async {
-            let chain_id_u64 = action
+            let chain_id = action
                 .execution
                 .tx
                 .chain_id()
@@ -265,12 +325,13 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             let metric_future = build_metric_future(
                 self.cloudwatch_client.clone(),
                 DimensionValue::PriorityExecutor,
-                CwMetrics::ExecutionAttempted(chain_id_u64),
+                CwMetrics::ExecutionAttempted(chain_id),
                 1.0,
             );
             if let Some(metric_future) = metric_future {
                 send_metric_with_order_hash!(&order_hash, metric_future);
             }
+
             // send keystore metrics
             let keys_in_use = self.key_store.get_keys_in_use();
             let keys_available = self.key_store.get_keys_available();
@@ -278,7 +339,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             let keys_in_use_future = build_metric_future(
                 self.cloudwatch_client.clone(),
                 DimensionValue::PriorityExecutor,
-                CwMetrics::KeysInUse(chain_id_u64),
+                CwMetrics::KeysInUse(chain_id),
                 keys_in_use as f64,
             );
             if let Some(metric_future) = keys_in_use_future {
@@ -288,26 +349,22 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             let keys_available_future = build_metric_future(
                 self.cloudwatch_client.clone(),
                 DimensionValue::PriorityExecutor,
-                CwMetrics::KeysAvailable(chain_id_u64),
+                CwMetrics::KeysAvailable(chain_id),
                 keys_available as f64,
             );
             if let Some(metric_future) = keys_available_future {
                 send_metric_with_order_hash!(&order_hash, metric_future);
             }
 
-            // Acquire a key from the key store
             let (addr, private_key) = self
                 .key_store
                 .acquire_key()
                 .await
                 .context("Failed to acquire key")?;
-            
-            // Store the address for cleanup
-            public_address = Some(addr.clone());
-            
             info!("{} - Acquired key: {}", order_hash, addr);
 
-            let chain_id = chain_id_u64;
+            // Store the address for cleanup
+            public_address = Some(addr.clone());
 
             let wallet = EthereumWallet::from(
                 private_key
@@ -324,7 +381,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             // always use 1_000_000 gas for now
             let target_block = match action.metadata.target_block {
                 Some(b) => BlockId::Number(b.into()),
-                _ => BlockId::Number(BlockNumberOrTag::Latest),
+                None => BlockId::Number(BlockNumberOrTag::Latest),
             };
 
             info!(
@@ -340,7 +397,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                 .context("Error getting gas price")?;
             let bid_priority_fees = self.get_bids_for_order(&action, &order_hash);
 
-            if bid_priority_fees.len() == 0 {
+            if bid_priority_fees.is_empty() {
                 info!(
                     "{} - No bid priority fees, indicating quote < amount_out_required; skipping",
                     order_hash
@@ -350,16 +407,15 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
 
             // Create a tx for each bid
-            let mut tx_requests: Vec<WithOtherFields<TransactionRequest>> = Vec::new();
-            for bid_priority_fee in bid_priority_fees.iter() {
-                if let Some(bid) = bid_priority_fee {
-                    let mut tx_request = action.execution.tx.clone();
-                    let bid_priority_fee_128 = bid.to::<u128>();
-                    tx_request.set_gas_limit(GAS_LIMIT);
-                    tx_request.set_max_fee_per_gas(base_fee + bid_priority_fee_128);
-                    tx_request.set_max_priority_fee_per_gas(bid_priority_fee_128);
-                    tx_requests.push(tx_request);
-                }
+            let mut tx_requests = Vec::<WithOtherFields<TransactionRequest>>::new();
+            for bid in bid_priority_fees.iter().flatten() {
+                let bid = bid.to::<u128>();
+
+                let mut tx_request = action.execution.tx.clone();
+                tx_request.set_gas_limit(GAS_LIMIT);
+                tx_request.set_max_fee_per_gas(base_fee + bid);
+                tx_request.set_max_priority_fee_per_gas(bid);
+                tx_requests.push(tx_request);
             }
 
             // Retry up to 3 times to get the nonce.
@@ -382,28 +438,32 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             let metric_future = build_metric_future(
                 self.cloudwatch_client.clone(),
                 DimensionValue::PriorityExecutor,
-                CwMetrics::OrderBid(chain_id_u64),
+                CwMetrics::OrderBid(chain_id),
                 1.0,
             );
             if let Some(metric_future) = metric_future {
                 send_metric_with_order_hash!(&order_hash, metric_future);
             }
-            info!("{} - Executing {} transactions in parallel from {:?} using {} (chain_id: {})", 
-                order_hash, 
-                tx_requests.len(), 
+            info!(
+                "{} - Executing {} transactions in parallel from {:?} using {} (chain_id: {})",
+                order_hash,
+                tx_requests.len(),
                 address,
-                if chain_id_u64 == UNICHAIN_ID { "bundle sending" } else { "direct transaction sending" },
-                chain_id_u64
+                if chain_id == UNICHAIN_ID {
+                    "bundle sending"
+                } else {
+                    "direct transaction sending"
+                },
+                chain_id
             );
 
             let mut attempts = 0;
             let mut success = false;
             let mut block_number = None;
             let mut retryable_failure = true;
-            
+
             // Retry tx submission on retryable failures if none of the transactions succeeded
             while attempts < MAX_RETRIES && !success && retryable_failure {
-
                 let metric_future = build_metric_future(
                     self.cloudwatch_client.clone(),
                     DimensionValue::PriorityExecutor,
@@ -414,20 +474,32 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                     send_metric_with_order_hash!(&order_hash, metric_future);
                 }
 
-                // Create futures for all transactions
-                let futures: Vec<_> = tx_requests.iter().map(|tx_request| {
-                    // Use send_bundle for Unichain, send_transaction for Base
-                    if chain_id_u64 == UNICHAIN_ID {
-                        Box::pin(self.send_bundle(&wallet, tx_request.clone(), &order_hash, chain_id_u64, target_block.as_u64().unwrap()))
-                            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransactionOutcome>> + Send>>
-                    } else {
-                        Box::pin(self.send_transaction(&wallet, tx_request.clone(), &order_hash, chain_id_u64, target_block.as_u64()))
-                            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransactionOutcome>> + Send>>
-                    }
-                }).collect();
+                let tx_futures = tx_requests
+                    .iter()
+                    .map(|tx_request| {
+                        if chain_id == UNICHAIN_ID {
+                            Box::pin(self.send_bundle(
+                                &wallet,
+                                tx_request.clone(),
+                                &order_hash,
+                                chain_id,
+                                target_block.as_u64().unwrap(),
+                            ))
+                                as Pin<Box<dyn Future<Output = Result<TransactionOutcome>> + Send>>
+                        } else {
+                            Box::pin(self.send_transaction(
+                                &wallet,
+                                tx_request.clone(),
+                                &order_hash,
+                                chain_id,
+                                target_block.as_u64(),
+                            ))
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
                 // Wait for all transactions to complete
-                let results = futures::future::join_all(futures).await;
+                let results = futures::future::join_all(tx_futures).await;
 
                 // Check results
                 retryable_failure = false;
@@ -441,13 +513,18 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                             let metric_future = build_metric_future(
                                 self.cloudwatch_client.clone(),
                                 DimensionValue::PriorityExecutor,
-                                CwMetrics::OrderFilled(chain_id_u64),
+                                CwMetrics::OrderFilled(chain_id),
                                 1.0,
                             );
                             if let Some(metric_future) = metric_future {
                                 send_metric_with_order_hash!(&order_hash, metric_future);
                             }
-                            info!("{} - Transaction {} succeeded at block {}", order_hash, i, block_number.unwrap());
+                            info!(
+                                "{} - Transaction {} succeeded at block {}",
+                                order_hash,
+                                i,
+                                block_number.unwrap()
+                            );
                             break;
                         }
                         Ok(TransactionOutcome::Failure(result)) => {
@@ -455,7 +532,6 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                                 block_number = *result;
                             }
                             // Find the transaction that won the bid and compare the winning bid to our own bid
-                            
                         }
                         Ok(TransactionOutcome::RetryableFailure) => {
                             retryable_failure = true;
@@ -483,11 +559,11 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
 
             // post key-release processing
-            if let Some(_) = &self.cloudwatch_client {
+            if self.cloudwatch_client.is_some() {
                 let metric_future = build_metric_future(
                     self.cloudwatch_client.clone(),
                     DimensionValue::PriorityExecutor,
-                    receipt_status_to_metric(success, chain_id_u64),
+                    receipt_status_to_metric(success, chain_id),
                     1.0,
                 );
                 if let Some(metric_future) = metric_future {
@@ -525,8 +601,9 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
             }
 
             Ok(())
-        }.await;
-        
+        }
+        .await;
+
         // Ensure key is released if it was acquired
         if let Some(addr) = public_address {
             match self.key_store.release_key(addr.clone()).await {
@@ -538,7 +615,7 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
                 }
             }
         }
-        
+
         result
     }
 }
@@ -546,13 +623,13 @@ impl Executor<SubmitTxToMempoolWithExecutionMetadata> for PriorityExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{U256, U128, U64};
+    use crate::strategies::priority_strategy::ExecutionMetadata;
+    use crate::strategies::types::SubmitTxToMempoolWithExecutionMetadata;
     use alloy::network::AnyNetwork;
+    use alloy::primitives::{U128, U256, U64};
     use alloy::providers::{DynProvider, Provider, RootProvider};
     use alloy::rpc::types::TransactionRequest;
-    use crate::strategies::types::SubmitTxToMempoolWithExecutionMetadata;
-    use crate::strategies::priority_strategy::ExecutionMetadata;
-    use artemis_core::executors::mempool_executor::{SubmitTxToMempool, GasBidInfo};
+    use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
     use std::sync::Arc;
 
     // Mock provider that implements the Provider trait
@@ -604,8 +681,8 @@ mod tests {
         );
 
         let action = create_test_action(
-            U256::from(9e17), // quote: 0.9 ETH
-            U256::from(8e17), // amount_required: 0.8 ETH
+            U256::from(9e17),   // quote: 0.9 ETH
+            U256::from(8e17),   // amount_required: 0.8 ETH
             U256::from(100000), // gas_estimate: 100k gas
             false,
             None,
@@ -627,8 +704,8 @@ mod tests {
 
         let action = create_test_action(
             U256::from(1000e18), // quote: 1000 ETH
-            U256::from(900e18), // amount_required: 900 ETH
-            U256::from(100000), // gas_estimate: 100k gas
+            U256::from(900e18),  // amount_required: 900 ETH
+            U256::from(100000),  // gas_estimate: 100k gas
             false,
             None,
         );
@@ -671,7 +748,7 @@ mod tests {
         let action = create_test_action(
             U256::from(2e17), // quote: 0.2 ETH
             U256::from(1e17), // amount_required: 0.1 ETH
-            U256::from(0), // gas_estimate: 0 gas
+            U256::from(0),    // gas_estimate: 0 gas
             false,
             None,
         );
@@ -690,8 +767,8 @@ mod tests {
         );
 
         let action = create_test_action(
-            U256::from(2e17), // quote: 0.2 ETH
-            U256::from(3e17), // amount_required: 0.3 ETH
+            U256::from(2e17),  // quote: 0.2 ETH
+            U256::from(3e17),  // amount_required: 0.3 ETH
             U256::from(10000), // gas_estimate: 10000 gas
             false,
             None,
@@ -711,8 +788,8 @@ mod tests {
         );
 
         let action = create_test_action(
-            U256::from(1e30), // quote: 1e12 ETH
-            U256::from(1e29), // amount_required: 1e11 ETH
+            U256::from(1e30),   // quote: 1e30 ETH
+            U256::from(1e29),   // amount_required: 1e29 ETH
             U256::from(100000), // gas_estimate: 100k gas
             false,
             None,

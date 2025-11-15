@@ -3,13 +3,6 @@ use anyhow::Result;
 use backoff::ExponentialBackoff;
 use clap::{ArgGroup, Parser};
 
-use artemis_core::engine::Engine;
-use artemis_core::types::{CollectorMap, ExecutorMap};
-use collectors::uniswapx_order_collector::OrderType;
-use collectors::{
-    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
-    uniswapx_route_collector::UniswapXRouteCollector,
-};
 use alloy::{
     hex,
     network::AnyNetwork,
@@ -17,6 +10,13 @@ use alloy::{
     pubsub::{ConnectionHandle, PubSubConnect},
     signers::local::PrivateKeySigner,
     transports::{impl_future, TransportResult},
+};
+use artemis_core::engine::Engine;
+use artemis_core::types::{CollectorMap, ExecutorMap};
+use collectors::uniswapx_order_collector::OrderType;
+use collectors::{
+    block_collector::BlockCollector, uniswapx_order_collector::UniswapXOrderCollector,
+    uniswapx_route_collector::UniswapXRouteCollector,
 };
 use executors::dutch_executor::DutchExecutor;
 use executors::queued_executor::QueuedExecutor;
@@ -39,7 +39,7 @@ pub mod executors;
 pub mod shared;
 pub mod strategies;
 
-/// CLI Options.
+/// CLI options.
 #[derive(Parser, Debug)]
 #[command(group(
     ArgGroup::new("key_source")
@@ -63,7 +63,7 @@ pub struct Args {
     #[arg(long, group = "key_source")]
     pub private_key: Option<String>,
 
-    /// Path to file containing mapping between public address and private key.
+    /// Path to file mapping public addresss to private keys.
     #[arg(long, group = "key_source")]
     pub private_key_file: Option<String>,
 
@@ -72,18 +72,34 @@ pub struct Args {
     #[arg(long, group = "key_source")]
     pub aws_secret_arn: Option<String>,
 
-    /// Percentage of profit to pay in gas.
+    /// Percentage of profit to pay in gas [0, 100]
+    ///
+    /// If set too low, the minimum gas price to execute the fill transaction will not be reached.
+    ///
+    /// Only for Dutch v3 executor.
     #[arg(long, required = false)]
     pub bid_percentage: Option<u128>,
 
-    /// Determines how aggressive to scale the fallback bids
-    /// 100 (default) = 1% of the profit
+    /// In addition to the bid, multiple fallback bids are placed. This
+    /// parameter determines how aggressively to scale these fallback bids.
+    ///
+    /// Only for priority executor.
+    ///
+    /// 100 = 1% of the profit
+    ///
+    /// The default value is 50, see DEFAULT_FALLBACK_BID_SCALE_FACTOR.
     #[arg(long, required = false)]
     pub fallback_bid_scale_factor: Option<u64>,
 
-    /// Minimum block percentage buffer for priority orders.
-    /// This determines how much time to wait before the target block to submit the fill transaction.
+    /// Minimum block percentage buffer.
+    ///
+    /// Only for priority executor.
+    ///
+    /// Determines how much time to wait before the target block to submit the fill transaction.
+    ///
     /// Example: 120 = 120% of the block time which would be 2.4 seconds with a block time of 2 seconds.
+    ///
+    /// Defaults to 100.
     #[arg(long, required = false)]
     pub min_block_percentage_buffer: Option<u64>,
 
@@ -91,17 +107,19 @@ pub struct Args {
     #[arg(long, required = true)]
     pub executor_address: String,
 
-    /// Order type to use.
+    /// Only fetch UniswapX orders with the specified type.
+    ///
+    /// Options: DutchV2, DutchV3, Priority
     #[arg(long, required = true)]
     pub order_type: OrderType,
+
+    /// Fetch UniswapX orders with the specified chain ID.
+    #[arg(long, required = true)]
+    pub chain_id: u64,
 
     /// Enable CloudWatch logging
     #[arg(long, group = "aws_features")]
     pub cloudwatch_metrics: bool,
-
-    /// chain id
-    #[arg(long, required = true)]
-    pub chain_id: u64,
 
     /// Optional UniswapX API Key
     #[arg(long)]
@@ -154,10 +172,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Set up ethers provider.
-    let chain_id = args.chain_id;
     let mut client = None;
     let mut sender_client = None;
-    
+
     if let Some(wss) = args.wss {
         let ws = WsConnect::new(wss.as_str());
         let retry_ws = RetryWsConnect(ws);
@@ -166,7 +183,7 @@ async fn main() -> Result<()> {
         let wss_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(wss_client)
+                .on_client(wss_client),
         ));
         client = Some(wss_provider.clone());
         sender_client = Some(wss_provider.clone());
@@ -180,16 +197,16 @@ async fn main() -> Result<()> {
         let http_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(http_client)
+                .on_client(http_client),
         ));
         // prefer http provider for sending txs
         sender_client = Some(http_provider.clone());
         // prefer wss provider for fetching blocks
-        if !client.is_some() {
+        if client.is_none() {
             client = Some(http_provider.clone());
         }
     }
-    if !client.is_some() {
+    if client.is_none() {
         panic!("No provider found. Please provide either a WSS endpoint (--wss) or an HTTP endpoint (--http).");
     }
 
@@ -230,10 +247,11 @@ async fn main() -> Result<()> {
     }
     info!("Key store initialized with {} keys", key_store.len());
 
-    // Set up engine.
+    // Set up Artemis engine.
     let mut engine = Engine::default();
 
-    // Set up block collector.
+    // Set up Ethereum block collector to fetch each block's hash, number and timestamp.
+    // Used to identify completed orders.
     let block_collector = Box::new(BlockCollector::new(client.clone().unwrap()));
     let block_collector = CollectorMap::new(block_collector, Event::NewBlock);
     engine.add_collector(Box::new(block_collector));
@@ -241,15 +259,16 @@ async fn main() -> Result<()> {
     let (batch_sender, batch_receiver) = channel(512);
     let (route_sender, route_receiver) = channel(512);
 
+    // Set up UniswapX order collector by polling API, see POLL_INTERVAL_MS.
+    // Only fetches orders for given chain ID and order type.
     let uniswapx_order_collector = Box::new(UniswapXOrderCollector::new(
-        chain_id,
+        args.chain_id,
         args.order_type.clone(),
         args.executor_address.clone(),
         args.uniswapx_api_key,
     ));
-    let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
-        Event::UniswapXOrder(Box::new(e))
-    });
+    let uniswapx_order_collector =
+        CollectorMap::new(uniswapx_order_collector, |e| Event::Order(Box::new(e)));
     engine.add_collector(Box::new(uniswapx_order_collector));
 
     let cloudwatch_client = if args.cloudwatch_metrics {
@@ -259,15 +278,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Determines possible routes for shortlisted orders using Uniswap API
     let uniswapx_route_collector = Box::new(UniswapXRouteCollector::new(
-        chain_id,
+        args.chain_id,
         batch_receiver,
         route_sender,
         args.executor_address.clone(),
         cloudwatch_client.clone(),
     ));
     let uniswapx_route_collector = CollectorMap::new(uniswapx_route_collector, |e| {
-        Event::UniswapXRoute(Box::new(e))
+        Event::RoutedOrder(Box::new(e))
     });
     engine.add_collector(Box::new(uniswapx_route_collector));
 
@@ -280,39 +300,40 @@ async fn main() -> Result<()> {
 
     match &args.order_type {
         OrderType::DutchV2 => {
-            let uniswapx_strategy = UniswapXUniswapFill::new(
+            let strategy = UniswapXUniswapFill::new(
                 client.clone().unwrap(),
                 config.clone(),
                 batch_sender,
                 route_receiver,
                 cloudwatch_client.clone(),
-                chain_id,
+                args.chain_id,
             );
-            engine.add_strategy(Box::new(uniswapx_strategy));
+            engine.add_strategy(Box::new(strategy));
         }
+
         OrderType::DutchV3 => {
-            let uniswapx_strategy = UniswapXDutchV3Fill::new(
+            let strategy = UniswapXDutchV3Fill::new(
                 client.clone().unwrap(),
                 cloudwatch_client.clone(),
                 config.clone(),
                 batch_sender,
                 route_receiver,
                 key_store.get_address().unwrap(),
-                chain_id,
+                args.chain_id,
             );
-            engine.add_strategy(Box::new(uniswapx_strategy));
+            engine.add_strategy(Box::new(strategy));
         }
+
         OrderType::Priority => {
-            let priority_strategy = UniswapXPriorityFill::new(
+            let strategy = UniswapXPriorityFill::new(
                 client.clone().unwrap(),
                 cloudwatch_client.clone(),
                 config.clone(),
                 batch_sender,
                 route_receiver,
-                chain_id,
+                args.chain_id,
             );
-
-            engine.add_strategy(Box::new(priority_strategy));
+            engine.add_strategy(Box::new(strategy));
         }
     }
 
@@ -341,7 +362,6 @@ async fn main() -> Result<()> {
         _ => None,
     });
 
-
     engine.add_executor(Box::new(queued_executor));
     engine.add_executor(Box::new(protect_executor));
 
@@ -351,17 +371,18 @@ async fn main() -> Result<()> {
             while let Some(res) = set.join_next().await {
                 match res {
                     Ok(res) => {
-                        info!("res: {:?}", res);
+                        info!("res: {res:?}");
                     }
                     Err(e) => {
-                        info!("error: {:?}", e);
+                        info!("error: {e:?}");
                     }
                 }
             }
         }
         Err(e) => {
-            error!("Engine run error: {:?}", e);
+            error!("Engine run error: {e:?}");
         }
     }
+
     Ok(())
 }
