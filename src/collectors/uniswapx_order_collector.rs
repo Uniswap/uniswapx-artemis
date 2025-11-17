@@ -227,9 +227,7 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 stream::once(async { Err(e) }).right_stream()
             },
         })
-        .filter_map({
-            let cloudwatch_client = cloudwatch_client.clone();
-            move |result| {
+        .filter_map(move |result|{
                 let cloudwatch_client = cloudwatch_client.clone();
                 async move {
                     match result {
