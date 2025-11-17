@@ -239,21 +239,20 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap()
                                 .as_secs();
-                            let created_at = value.created_at;
-                            let time_delta_ms = (current_time - created_at) * 1000;
+                            let time_delta_secs = current_time - value.created_at;
                             
                             // Log metric for order staleness (only for new orders)
                             // flat_map already filtered out duplicates, so this is guaranteed to be a new order
                             let metric_future = build_metric_future(
-                                cloudwatch_client.clone(),
+                                cloudwatch_client,
                                 DimensionValue::OrderCollector,
-                                CwMetrics::OrderStalenessMs(chain_id),
-                                time_delta_ms as f64,
+                                CwMetrics::OrderStalenessSec(chain_id),
+                                time_delta_secs as f64,
                             );
                             if let Some(metric_future) = metric_future {
                                 send_metric_with_order_hash!(&Arc::new(value.order_hash.clone()), metric_future);
                             }
-                            tracing::info!("Order staleness: {} ms", time_delta_ms);
+                            tracing::info!("Order staleness: {} s", time_delta_secs);
                             
                             Some(value)
                         },

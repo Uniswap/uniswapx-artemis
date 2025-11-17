@@ -34,7 +34,7 @@ pub const TARGET_BLOCK_DELTA: &str = "TargetBlockDelta";
 pub const REVERT_CODE_METRIC: &str = "RevertCode";
 pub const KEYS_IN_USE: &str = "KeysInUse";
 pub const KEYS_AVAILABLE: &str = "KeysAvailable";
-pub const ORDER_STALENESS_MS: &str = "OrderStalenessMs";
+pub const ORDER_STALENESS_SEC: &str = "OrderStalenessSec";
 
 pub enum DimensionName {
     Service,
@@ -113,7 +113,7 @@ pub enum CwMetrics {
     KeysAvailable(u64),  // chain_id
     
     /// Order staleness metric (time delta between current time and createdAt)
-    OrderStalenessMs(u64),     // chain_id
+    OrderStalenessSec(u64),     // chain_id
 }
 impl From<CwMetrics> for String {
     fn from(metric: CwMetrics) -> Self {
@@ -144,7 +144,7 @@ impl From<CwMetrics> for String {
             CwMetrics::RevertCode(chain_id, code) => format!("{}-{}-{}", chain_id, REVERT_CODE_METRIC, code),
             CwMetrics::KeysInUse(chain_id) => format!("{}-{}", chain_id, KEYS_IN_USE),
             CwMetrics::KeysAvailable(chain_id) => format!("{}-{}", chain_id, KEYS_AVAILABLE),
-            CwMetrics::OrderStalenessMs(chain_id) => format!("{}-{}", chain_id, ORDER_STALENESS_MS),
+            CwMetrics::OrderStalenessSec(chain_id) => format!("{}-{}", chain_id, ORDER_STALENESS_SEC),
         }
     }
 }
