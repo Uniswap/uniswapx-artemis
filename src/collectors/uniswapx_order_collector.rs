@@ -7,9 +7,14 @@ use serde::Deserialize;
 use std::fmt;
 use std::str::FromStr;
 use std::string::ToString;
+use std::sync::Arc;
+use std::collections::HashSet;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
-use crate::shared::RouteInfo;
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
+use crate::shared::{RouteInfo, send_metric_with_order_hash};
+use crate::aws_utils::cloudwatch_utils::{build_metric_future, CwMetrics, DimensionValue};
 
 static UNISWAPX_API_URL: &str = "https://api.uniswap.org/v2";
 static POLL_INTERVAL_MS: u64 = 250;
@@ -90,10 +95,17 @@ pub struct UniswapXOrderCollector {
     pub chain_id: u64,
     pub order_type: OrderType,
     pub execute_address: String,
+    pub cloudwatch_client: Option<Arc<CloudWatchClient>>,
 }
 
 impl UniswapXOrderCollector {
-    pub fn new(chain_id: u64, order_type: OrderType, execute_address: String, api_key: Option<String>) -> Self {
+    pub fn new(
+        chain_id: u64,
+        order_type: OrderType,
+        execute_address: String,
+        api_key: Option<String>,
+        cloudwatch_client: Option<Arc<CloudWatchClient>>,
+    ) -> Self {
         Self {
             client: Client::new(),
             base_url: UNISWAPX_API_URL.to_string(),
@@ -101,6 +113,7 @@ impl UniswapXOrderCollector {
             chain_id,
             order_type,
             execute_address,
+            cloudwatch_client,
         }
     }
 }
@@ -121,6 +134,13 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
             order_type = %self.order_type,
             "Starting UniswapX order collector stream"
         );
+
+        // Capture values needed in the closures
+        let cloudwatch_client = self.cloudwatch_client.clone();
+        let chain_id = self.chain_id;
+        
+        // Track seen order hashes to only log staleness for new orders
+        let seen_orders: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         // stream that polls the UniswapX API
         let stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(
@@ -174,21 +194,74 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 }
             }
         })
-        .flat_map(
-            |values_result: Result<Vec<UniswapXOrder>>| match values_result {
-                Ok(values) => stream::iter(values.into_iter().map(Ok)).left_stream(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Error in order stream, skipping batch");
-                    stream::once(async { Err(e) }).right_stream()
-                },
+        .then({
+            let seen_orders = seen_orders.clone();
+            move |values_result: Result<Vec<UniswapXOrder>>| {
+                let seen_orders = seen_orders.clone();
+                async move {
+                    match values_result {
+                        Ok(values) => {
+                            let mut seen = seen_orders.lock().await;
+                            let mut new_orders = Vec::new();
+                            
+                            for order in values {
+                                let is_new = seen.insert(order.order_hash.clone());
+                                if is_new {
+                                    new_orders.push(order);
+                                }
+                            }
+                            
+                            Ok(new_orders)
+                        },
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Error in order stream, skipping batch");
+                            Err(e)
+                        },
+                    }
+                }
+            }
+        })
+        .flat_map(|result: Result<Vec<UniswapXOrder>>| match result {
+            Ok(values) => stream::iter(values.into_iter().map(Ok)).left_stream(),
+            Err(e) => {
+                stream::once(async { Err(e) }).right_stream()
             },
-        )
-        .filter_map(|result| async {
-            match result {
-                Ok(value) => Some(value),
-                Err(e) => {
-                    tracing::error!(error = %e, "Error processing order, skipping");
-                    None
+        })
+        .filter_map({
+            let cloudwatch_client = cloudwatch_client.clone();
+            move |result| {
+                let cloudwatch_client = cloudwatch_client.clone();
+                async move {
+                    match result {
+                        Ok(value) => {
+                            // Calculate time delta between current time and createdAt
+                            let current_time = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            let created_at = value.created_at;
+                            let time_delta_ms = (current_time - created_at) * 1000;
+                            
+                            // Log metric for order staleness (only for new orders)
+                            // flat_map already filtered out duplicates, so this is guaranteed to be a new order
+                            let metric_future = build_metric_future(
+                                cloudwatch_client.clone(),
+                                DimensionValue::OrderCollector,
+                                CwMetrics::OrderStalenessMs(chain_id),
+                                time_delta_ms as f64,
+                            );
+                            if let Some(metric_future) = metric_future {
+                                send_metric_with_order_hash!(&Arc::new(value.order_hash.clone()), metric_future);
+                            }
+                            tracing::info!("Order staleness: {} ms", time_delta_ms);
+                            
+                            Some(value)
+                        },
+                        Err(e) => {
+                            tracing::error!(error = %e, "Error processing order, skipping");
+                            None
+                        }
+                    }
                 }
             }
         });
@@ -234,6 +307,7 @@ mod tests {
             order_type: order_type,
             // Inconsequential query parameter because we mock the order service response
             execute_address: "0x0000000000000000000000000000000000000000".to_string(),
+            cloudwatch_client: None,
         };
 
         (res, server, mock)

@@ -241,23 +241,24 @@ async fn main() -> Result<()> {
     let (batch_sender, batch_receiver) = channel(512);
     let (route_sender, route_receiver) = channel(512);
 
-    let uniswapx_order_collector = Box::new(UniswapXOrderCollector::new(
-        chain_id,
-        args.order_type.clone(),
-        args.executor_address.clone(),
-        args.uniswapx_api_key,
-    ));
-    let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
-        Event::UniswapXOrder(Box::new(e))
-    });
-    engine.add_collector(Box::new(uniswapx_order_collector));
-
     let cloudwatch_client = if args.cloudwatch_metrics {
         let config = aws_config::load_from_env().await;
         Some(Arc::new(aws_sdk_cloudwatch::Client::new(&config)))
     } else {
         None
     };
+
+    let uniswapx_order_collector = Box::new(UniswapXOrderCollector::new(
+        chain_id,
+        args.order_type.clone(),
+        args.executor_address.clone(),
+        args.uniswapx_api_key,
+        cloudwatch_client.clone(),
+    ));
+    let uniswapx_order_collector = CollectorMap::new(uniswapx_order_collector, |e| {
+        Event::UniswapXOrder(Box::new(e))
+    });
+    engine.add_collector(Box::new(uniswapx_order_collector));
 
     let uniswapx_route_collector = Box::new(UniswapXRouteCollector::new(
         chain_id,
