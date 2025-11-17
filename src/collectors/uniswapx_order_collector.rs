@@ -227,39 +227,36 @@ impl Collector<UniswapXOrder> for UniswapXOrderCollector {
                 stream::once(async { Err(e) }).right_stream()
             },
         })
-        .filter_map({
+        .filter_map(move |result| {
             let cloudwatch_client = cloudwatch_client.clone();
-            move |result| {
-                let cloudwatch_client = cloudwatch_client.clone();
-                async move {
-                    match result {
-                        Ok(value) => {
-                            // Calculate time delta between current time and createdAt
-                            let current_time = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-                            let time_delta_secs = current_time - value.created_at;
-                            
-                            // Log metric for order staleness (only for new orders)
-                            // flat_map already filtered out duplicates, so this is guaranteed to be a new order
-                            let metric_future = build_metric_future(
-                                cloudwatch_client,
-                                DimensionValue::OrderCollector,
-                                CwMetrics::OrderStalenessSec(chain_id),
-                                time_delta_secs as f64,
-                            );
-                            if let Some(metric_future) = metric_future {
-                                send_metric_with_order_hash!(&Arc::new(value.order_hash.clone()), metric_future);
-                            }
-                            tracing::info!("Order staleness: {} s", time_delta_secs);
-                            
-                            Some(value)
-                        },
-                        Err(e) => {
-                            tracing::error!(error = %e, "Error processing order, skipping");
-                            None
+            async move {
+                match result {
+                    Ok(value) => {
+                        // Calculate time delta between current time and createdAt
+                        let current_time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let time_delta_secs = current_time - value.created_at;
+                        
+                        // Log metric for order staleness (only for new orders)
+                        // flat_map already filtered out duplicates, so this is guaranteed to be a new order
+                        let metric_future = build_metric_future(
+                            cloudwatch_client.clone(),
+                            DimensionValue::OrderCollector,
+                            CwMetrics::OrderStalenessSec(chain_id),
+                            time_delta_secs as f64,
+                        );
+                        if let Some(metric_future) = metric_future {
+                            send_metric_with_order_hash!(&Arc::new(value.order_hash.clone()), metric_future);
                         }
+                        tracing::info!("Order staleness: {} s", time_delta_secs);
+                        
+                        Some(value)
+                    },
+                    Err(e) => {
+                        tracing::error!(error = %e, "Error processing order, skipping");
+                        None
                     }
                 }
             }
