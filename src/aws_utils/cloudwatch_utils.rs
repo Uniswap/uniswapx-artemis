@@ -14,6 +14,7 @@ pub const ROUTER02: &str = "Router02";
 pub const PRIORITY_EXECUTOR: &str = "PriorityExecutor";
 pub const V2_EXECUTOR: &str = "V2Executor";
 pub const V3_EXECUTOR: &str = "V3Executor";
+pub const ORDER_COLLECTOR: &str = "OrderCollector";
 
 /// Constants for metric names
 pub const ROUTING_MS: &str = "RoutingMs";
@@ -33,6 +34,7 @@ pub const TARGET_BLOCK_DELTA: &str = "TargetBlockDelta";
 pub const REVERT_CODE_METRIC: &str = "RevertCode";
 pub const KEYS_IN_USE: &str = "KeysInUse";
 pub const KEYS_AVAILABLE: &str = "KeysAvailable";
+pub const ORDER_STALENESS_SEC: &str = "OrderStalenessSec";
 
 pub enum DimensionName {
     Service,
@@ -59,6 +61,7 @@ pub enum DimensionValue {
     V2Executor,
     V3Executor,
     Router02,
+    OrderCollector,
 }
 impl From<DimensionValue> for String {
     fn from(value: DimensionValue) -> Self {
@@ -67,6 +70,7 @@ impl From<DimensionValue> for String {
             DimensionValue::V2Executor => V2_EXECUTOR.to_string(),
             DimensionValue::V3Executor => V3_EXECUTOR.to_string(),
             DimensionValue::Router02 => ROUTER02.to_string(),
+            DimensionValue::OrderCollector => ORDER_COLLECTOR.to_string(),
         }
     }
 }
@@ -78,6 +82,7 @@ impl AsRef<str> for DimensionValue {
             DimensionValue::V2Executor => V2_EXECUTOR,
             DimensionValue::V3Executor => V3_EXECUTOR,
             DimensionValue::Router02 => ROUTER02,
+            DimensionValue::OrderCollector => ORDER_COLLECTOR,
         }
     }
 }
@@ -106,6 +111,9 @@ pub enum CwMetrics {
     /// Keystore metrics
     KeysInUse(u64),      // chain_id
     KeysAvailable(u64),  // chain_id
+    
+    /// Order staleness metric (time delta between current time and createdAt)
+    OrderStalenessSec(u64),     // chain_id
 }
 impl From<CwMetrics> for String {
     fn from(metric: CwMetrics) -> Self {
@@ -136,6 +144,7 @@ impl From<CwMetrics> for String {
             CwMetrics::RevertCode(chain_id, code) => format!("{}-{}-{}", chain_id, REVERT_CODE_METRIC, code),
             CwMetrics::KeysInUse(chain_id) => format!("{}-{}", chain_id, KEYS_IN_USE),
             CwMetrics::KeysAvailable(chain_id) => format!("{}-{}", chain_id, KEYS_AVAILABLE),
+            CwMetrics::OrderStalenessSec(chain_id) => format!("{}-{}", chain_id, ORDER_STALENESS_SEC),
         }
     }
 }
