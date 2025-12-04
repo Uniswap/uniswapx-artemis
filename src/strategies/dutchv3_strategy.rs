@@ -492,6 +492,11 @@ impl UniswapXDutchV3Fill {
                             route: route.cloned(),
                         },
                     );
+                } else {
+                    // Update the resolved field for existing orders to reflect current auction amounts
+                    if let Some(order_data) = self.open_orders.get_mut(order_hash) {
+                        order_data.resolved = resolved_order;
+                    }
                 }
             }
             // Noop
