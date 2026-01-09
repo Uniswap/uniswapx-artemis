@@ -38,6 +38,7 @@ pub enum OrderType {
     DutchV3,
     #[default]
     Priority,
+    Hybrid,
 }
 
 impl FromStr for OrderType {
@@ -48,6 +49,7 @@ impl FromStr for OrderType {
             "Dutch_V2" => Ok(OrderType::DutchV2),
             "Dutch_V3" => Ok(OrderType::DutchV3),
             "Priority" => Ok(OrderType::Priority),
+            "Hybrid" => Ok(OrderType::Hybrid),
             _ => Err(OrderTypeError::InvalidOrderType),
         }
     }
@@ -59,6 +61,7 @@ impl fmt::Display for OrderType {
             OrderType::DutchV2 => write!(f, "Dutch_V2"),
             OrderType::DutchV3 => write!(f, "Dutch_V3"),
             OrderType::Priority => write!(f, "Priority"),
+            OrderType::Hybrid => write!(f, "Hybrid"),
         }
     }
 }

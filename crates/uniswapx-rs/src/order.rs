@@ -139,6 +139,47 @@ sol! {
         uint256 minAmount;
         uint256 adjustmentPerGweiBaseFee;
     }
+
+    /// @notice Input tokens for hybrid auction
+    /// @dev if exact-in, input amount is fixed at maxAmount
+    /// @dev if exact-out, scale down from maxAmount
+    #[derive(Debug)]
+    struct HybridInput {
+        address token;
+        uint256 maxAmount;
+    }
+
+    /// @notice Output tokens for hybrid auction
+    /// @dev if exact-in, scale up from minAmount
+    /// @dev if exact-out, output amount is fixed at minAmount
+    #[derive(Debug)]
+    struct HybridOutput {
+        address token;
+        uint256 minAmount;
+        address recipient;
+    }
+
+    /// @notice Cosigner data for hybrid auction orders
+    #[derive(Debug)]
+    struct HybridCosignerData {
+        uint256 auctionTargetBlock;
+        uint256[] supplementalPriceCurve;
+    }
+
+    /// @notice Hybrid auction order combining Dutch decay and priority gas auctions
+    #[derive(Debug)]
+    struct HybridOrder {
+        OrderInfo info;
+        address cosigner;
+        HybridInput input;
+        HybridOutput[] outputs;
+        uint256 auctionStartBlock;
+        uint256 baselinePriorityFee;
+        uint256 scalingFactor;
+        uint256[] priceCurve;
+        HybridCosignerData cosignerData;
+        bytes cosignature;
+    }
 }
 
 pub const MPS: u64 = 1e7 as u64;
@@ -150,6 +191,7 @@ pub enum Order {
     V2DutchOrder(V2DutchOrder),
     PriorityOrder(PriorityOrder),
     V3DutchOrder(V3DutchOrder),
+    HybridOrder(HybridOrder),
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -166,6 +208,7 @@ impl Order {
             Order::V2DutchOrder(order) => order.encode_inner(),
             Order::PriorityOrder(order) => order.encode_inner(),
             Order::V3DutchOrder(order) => order.encode_inner(),
+            Order::HybridOrder(order) => order.encode_inner(),
         }
     }
 
@@ -192,6 +235,18 @@ impl Order {
                 ) {
                     TradeType::ExactOut
                 } else {
+                    TradeType::ExactIn
+                }
+            }
+            Order::HybridOrder(order) => {
+                // HybridOrder trade type is determined by scalingFactor
+                // > 1e18 = exact-in, < 1e18 = exact-out, == 1e18 = depends on price curve
+                if order.scalingFactor > BASE_SCALING_FACTOR {
+                    TradeType::ExactIn
+                } else if order.scalingFactor < BASE_SCALING_FACTOR {
+                    TradeType::ExactOut
+                } else {
+                    // Neutral scaling factor - default to exact-in
                     TradeType::ExactIn
                 }
             }
@@ -430,6 +485,335 @@ impl V3DutchOrder {
             Ok(resolved_outputs) => OrderResolution::Resolved(ResolvedOrder { input, outputs: resolved_outputs }),
             Err(_) => OrderResolution::Invalid,
         }
+    }
+}
+
+/// Base scaling factor (1e18) used as neutral point for hybrid auctions
+pub const BASE_SCALING_FACTOR: U256 = Uint::from_limbs([1_000_000_000_000_000_000u64, 0, 0, 0]);
+
+/// Price curve element: upper 16 bits = duration (blocks), lower 240 bits = scaling factor
+#[derive(Debug, Clone, Copy)]
+pub struct PriceCurveElement {
+    pub duration: u16,
+    pub scaling_factor: U256,
+}
+
+impl PriceCurveElement {
+    /// Parse a price curve element from a U256
+    /// Format: (duration << 240) | scalingFactor
+    pub fn from_u256(value: U256) -> Self {
+        // Extract upper 16 bits as duration
+        let duration_u256: U256 = value >> 240;
+        let duration: u16 = u16::try_from(duration_u256.min(U256::from(u16::MAX))).unwrap_or(u16::MAX);
+        // Mask for lower 240 bits (30 bytes)
+        let mask: U256 = (U256::from(1u64) << 240) - U256::from(1u64);
+        let scaling_factor = value & mask;
+        Self { duration, scaling_factor }
+    }
+}
+
+impl HybridOrder {
+    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
+        Ok(HybridOrder::abi_decode(order_hex, validate)?)
+    }
+
+    pub fn encode_inner(&self) -> Vec<u8> {
+        HybridOrder::abi_encode(self)
+    }
+
+    /// Resolve the hybrid order at the given block number and timestamp
+    ///
+    /// # Arguments
+    /// * `block_number` - Current block number
+    /// * `timestamp` - Current block timestamp
+    /// * `priority_fee` - Priority fee above baseline (tx.gasprice - block.basefee - baselinePriorityFee)
+    ///
+    /// # Returns
+    /// * `OrderResolution` - The resolved order or status
+    pub fn resolve(&self, block_number: u64, timestamp: u64, priority_fee: U256) -> OrderResolution {
+        let timestamp = U256::from(timestamp);
+
+        // Check deadline
+        if self.info.deadline.lt(&timestamp) {
+            return OrderResolution::Expired;
+        }
+
+        // Determine effective auction target block
+        let auction_target_block = if self.cosignerData.auctionTargetBlock != U256::ZERO {
+            self.cosignerData.auctionTargetBlock
+        } else {
+            self.auctionStartBlock
+        };
+
+        let block_number_u256 = U256::from(block_number);
+
+        // Check if auction has started
+        if auction_target_block != U256::ZERO && block_number_u256 < auction_target_block {
+            // Not fillable yet - return with base amounts
+            let input = ResolvedInput {
+                token: self.input.token.to_string(),
+                amount: self.input.maxAmount,
+            };
+            let outputs: Vec<ResolvedOutput> = self.outputs.iter().map(|o| ResolvedOutput {
+                token: o.token.to_string(),
+                amount: o.minAmount,
+                recipient: o.recipient.to_string(),
+            }).collect();
+            return OrderResolution::NotFillableYet(ResolvedOrder { input, outputs });
+        }
+
+        // Calculate current scaling factor from price curve
+        let effective_price_curve = if !self.cosignerData.supplementalPriceCurve.is_empty() {
+            // Apply supplemental price curve (simplified - just use it directly for now)
+            // Full implementation would combine with base price curve
+            &self.cosignerData.supplementalPriceCurve
+        } else {
+            &self.priceCurve
+        };
+
+        let current_scaling_factor = match Self::get_price_curve_scaling(
+            effective_price_curve,
+            auction_target_block,
+            block_number_u256,
+        ) {
+            Ok(factor) => factor,
+            Err(_) => return OrderResolution::Invalid,
+        };
+
+        // Validate scaling direction consistency
+        if !shares_scaling_direction(self.scalingFactor, current_scaling_factor) {
+            return OrderResolution::Invalid;
+        }
+
+        // Determine if exact-in or exact-out mode
+        let use_exact_in = self.scalingFactor > BASE_SCALING_FACTOR
+            || (self.scalingFactor == BASE_SCALING_FACTOR && current_scaling_factor >= BASE_SCALING_FACTOR);
+
+        // Calculate scaling multiplier with priority fee adjustment
+        let scaling_multiplier = if use_exact_in {
+            // Exact-in: scalingMultiplier = currentScalingFactor + ((scalingFactor - 1e18) * priorityFee)
+            let priority_adjustment = self.scalingFactor
+                .saturating_sub(BASE_SCALING_FACTOR)
+                .saturating_mul(priority_fee);
+            current_scaling_factor.saturating_add(priority_adjustment)
+        } else {
+            // Exact-out: scalingMultiplier = currentScalingFactor - ((1e18 - scalingFactor) * priorityFee)
+            let priority_adjustment = BASE_SCALING_FACTOR
+                .saturating_sub(self.scalingFactor)
+                .saturating_mul(priority_fee);
+            current_scaling_factor.saturating_sub(priority_adjustment)
+        };
+
+        // Resolve amounts based on mode
+        if use_exact_in {
+            // Exact-in: input is fixed at maxAmount, outputs are scaled up
+            let input = ResolvedInput {
+                token: self.input.token.to_string(),
+                amount: self.input.maxAmount,
+            };
+            let outputs: Vec<ResolvedOutput> = self.outputs.iter().map(|o| {
+                // mulWadUp: (amount * scaling + WAD - 1) / WAD
+                let scaled_amount = mul_wad_up(o.minAmount, scaling_multiplier);
+                ResolvedOutput {
+                    token: o.token.to_string(),
+                    amount: scaled_amount,
+                    recipient: o.recipient.to_string(),
+                }
+            }).collect();
+            OrderResolution::Resolved(ResolvedOrder { input, outputs })
+        } else {
+            // Exact-out: outputs are fixed at minAmount, input is scaled down
+            let scaled_input = mul_wad(self.input.maxAmount, scaling_multiplier);
+            let input = ResolvedInput {
+                token: self.input.token.to_string(),
+                amount: scaled_input,
+            };
+            let outputs: Vec<ResolvedOutput> = self.outputs.iter().map(|o| ResolvedOutput {
+                token: o.token.to_string(),
+                amount: o.minAmount,
+                recipient: o.recipient.to_string(),
+            }).collect();
+            OrderResolution::Resolved(ResolvedOrder { input, outputs })
+        }
+    }
+
+    /// Calculate the current scaling factor from the price curve
+    ///
+    /// # Arguments
+    /// * `price_curve` - Array of price curve elements
+    /// * `target_block` - The auction start block
+    /// * `fill_block` - The current block number
+    ///
+    /// # Returns
+    /// * `Result<U256>` - The current scaling factor or error
+    fn get_price_curve_scaling(
+        price_curve: &[U256],
+        target_block: U256,
+        fill_block: U256,
+    ) -> Result<U256> {
+        // Empty price curve returns neutral scaling
+        if price_curve.is_empty() {
+            return Ok(BASE_SCALING_FACTOR);
+        }
+
+        // No auction (target_block == 0) with price curve is invalid
+        if target_block == U256::ZERO {
+            return Err(anyhow::anyhow!("Invalid target block designation"));
+        }
+
+        // Calculate blocks passed since target
+        if fill_block < target_block {
+            return Err(anyhow::anyhow!("Fill block before target block"));
+        }
+        let blocks_passed = fill_block.saturating_sub(target_block);
+
+        Self::get_calculated_values(price_curve, blocks_passed)
+    }
+
+    /// Calculate the scaling factor value based on block progression through the price curve
+    /// This mirrors PriceCurveLib.getCalculatedValues from Solidity
+    fn get_calculated_values(parameters: &[U256], blocks_passed: U256) -> Result<U256> {
+        if parameters.is_empty() {
+            return Ok(BASE_SCALING_FACTOR);
+        }
+
+        let mut blocks_counted = U256::ZERO;
+        let mut current_scaling_factor = BASE_SCALING_FACTOR;
+        let mut has_passed_zero_duration = false;
+
+        for i in 0..parameters.len() {
+            let element = PriceCurveElement::from_u256(parameters[i]);
+            let duration = U256::from(element.duration);
+            let scaling_factor = element.scaling_factor;
+
+            // Special handling for zero duration
+            if duration == U256::ZERO {
+                if blocks_passed >= blocks_counted {
+                    current_scaling_factor = scaling_factor;
+                    has_passed_zero_duration = true;
+
+                    // If exactly at this point, return these values
+                    if blocks_passed == blocks_counted {
+                        return Ok(scaling_factor);
+                    }
+                }
+                continue;
+            }
+
+            // If blocks_passed is in this segment
+            if blocks_passed < blocks_counted + duration {
+                if has_passed_zero_duration && i > 0 {
+                    let prev_element = PriceCurveElement::from_u256(parameters[i - 1]);
+                    if prev_element.duration == 0 {
+                        // Interpolate from zero duration values
+                        let zero_duration_scaling = prev_element.scaling_factor;
+
+                        if !shares_scaling_direction(zero_duration_scaling, scaling_factor) {
+                            return Err(anyhow::anyhow!("Invalid price curve parameters"));
+                        }
+
+                        current_scaling_factor = locate_current_amount(
+                            zero_duration_scaling,
+                            scaling_factor,
+                            blocks_counted,
+                            blocks_passed,
+                            blocks_counted + duration,
+                            zero_duration_scaling > BASE_SCALING_FACTOR,
+                        );
+                        return Ok(current_scaling_factor);
+                    }
+                }
+
+                // Standard interpolation
+                let end_scaling_factor = if i + 1 < parameters.len() {
+                    let next_element = PriceCurveElement::from_u256(parameters[i + 1]);
+                    next_element.scaling_factor
+                } else {
+                    BASE_SCALING_FACTOR
+                };
+
+                if !shares_scaling_direction(scaling_factor, end_scaling_factor) {
+                    return Err(anyhow::anyhow!("Invalid price curve parameters"));
+                }
+
+                current_scaling_factor = locate_current_amount(
+                    scaling_factor,
+                    end_scaling_factor,
+                    blocks_counted,
+                    blocks_passed,
+                    blocks_counted + duration,
+                    scaling_factor > BASE_SCALING_FACTOR,
+                );
+                return Ok(current_scaling_factor);
+            }
+
+            blocks_counted += duration;
+        }
+
+        // Exceeded total blocks
+        if blocks_passed >= blocks_counted {
+            return Err(anyhow::anyhow!("Price curve blocks exceeded"));
+        }
+
+        Ok(current_scaling_factor)
+    }
+}
+
+/// Check if two values share the same scaling direction (both >= 1e18 or both <= 1e18)
+fn shares_scaling_direction(a: U256, b: U256) -> bool {
+    a == BASE_SCALING_FACTOR
+        || b == BASE_SCALING_FACTOR
+        || (a > BASE_SCALING_FACTOR) == (b > BASE_SCALING_FACTOR)
+}
+
+/// Linear interpolation between two amounts based on block progression
+fn locate_current_amount(
+    start_amount: U256,
+    end_amount: U256,
+    start_block: U256,
+    current_block: U256,
+    end_block: U256,
+    round_up: bool,
+) -> U256 {
+    if start_amount == end_amount {
+        return start_amount;
+    }
+
+    let duration = end_block.saturating_sub(start_block);
+    let elapsed = current_block.saturating_sub(start_block);
+    let remaining = duration.saturating_sub(elapsed);
+
+    if duration == U256::ZERO {
+        return start_amount;
+    }
+
+    // Calculate: (startAmount * remaining + endAmount * elapsed) / duration
+    let start_weighted = start_amount.saturating_mul(remaining);
+    let end_weighted = end_amount.saturating_mul(elapsed);
+    let total = start_weighted.saturating_add(end_weighted);
+
+    if round_up && total != U256::ZERO {
+        // Round up: (total + duration - 1) / duration
+        total.saturating_add(duration).saturating_sub(U256::from(1u64)) / duration
+    } else {
+        total / duration
+    }
+}
+
+/// Multiply with WAD (1e18) precision, rounding down
+/// result = (a * b) / 1e18
+fn mul_wad(a: U256, b: U256) -> U256 {
+    a.saturating_mul(b) / BASE_SCALING_FACTOR
+}
+
+/// Multiply with WAD (1e18) precision, rounding up
+/// result = (a * b + 1e18 - 1) / 1e18
+fn mul_wad_up(a: U256, b: U256) -> U256 {
+    let product = a.saturating_mul(b);
+    if product == U256::ZERO {
+        U256::ZERO
+    } else {
+        product.saturating_add(BASE_SCALING_FACTOR).saturating_sub(U256::from(1u64)) / BASE_SCALING_FACTOR
     }
 }
 
