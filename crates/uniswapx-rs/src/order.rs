@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fmt;
 
 use alloy_dyn_abi::SolType;
 use alloy_primitives::Uint;
@@ -9,6 +10,41 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::sol_math::MulDiv;
+
+/// Errors that can occur during price curve calculation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriceCurveError {
+    /// The order has a non-empty price curve but auctionStartBlock is 0.
+    /// This is invalid because there's no reference point to calculate block progression.
+    InvalidTargetBlockDesignation,
+    /// The fill block is before the target/auction start block
+    FillBlockBeforeTarget,
+    /// The current block exceeds the total duration of the price curve
+    PriceCurveBlocksExceeded,
+    /// The price curve contains elements with inconsistent scaling directions
+    InvalidPriceCurveParameters,
+}
+
+impl fmt::Display for PriceCurveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PriceCurveError::InvalidTargetBlockDesignation => {
+                write!(f, "Invalid target block designation: non-empty price curve with zero auctionStartBlock")
+            }
+            PriceCurveError::FillBlockBeforeTarget => {
+                write!(f, "Fill block is before target block")
+            }
+            PriceCurveError::PriceCurveBlocksExceeded => {
+                write!(f, "Current block exceeds price curve duration")
+            }
+            PriceCurveError::InvalidPriceCurveParameters => {
+                write!(f, "Invalid price curve parameters: inconsistent scaling directions")
+            }
+        }
+    }
+}
+
+impl Error for PriceCurveError {}
 
 fn current_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
@@ -283,6 +319,8 @@ pub enum OrderResolution {
     Expired,
     Invalid,
     NotFillableYet(ResolvedOrder),
+    /// HYBRID ORDER: has a non-empty price curve but auctionStartBlock is 0.
+    InvalidTargetBlockDesignation,
 }
 
 impl V2DutchOrder {
@@ -577,6 +615,9 @@ impl HybridOrder {
             block_number_u256,
         ) {
             Ok(factor) => factor,
+            Err(PriceCurveError::InvalidTargetBlockDesignation) => {
+                return OrderResolution::InvalidTargetBlockDesignation
+            }
             Err(_) => return OrderResolution::Invalid,
         };
 
@@ -645,12 +686,12 @@ impl HybridOrder {
     /// * `fill_block` - The current block number
     ///
     /// # Returns
-    /// * `Result<U256>` - The current scaling factor or error
+    /// * `Result<U256, PriceCurveError>` - The current scaling factor or error
     fn get_price_curve_scaling(
         price_curve: &[U256],
         target_block: U256,
         fill_block: U256,
-    ) -> Result<U256> {
+    ) -> Result<U256, PriceCurveError> {
         // Empty price curve returns neutral scaling
         if price_curve.is_empty() {
             return Ok(BASE_SCALING_FACTOR);
@@ -658,12 +699,12 @@ impl HybridOrder {
 
         // No auction (target_block == 0) with price curve is invalid
         if target_block == U256::ZERO {
-            return Err(anyhow::anyhow!("Invalid target block designation"));
+            return Err(PriceCurveError::InvalidTargetBlockDesignation);
         }
 
         // Calculate blocks passed since target
         if fill_block < target_block {
-            return Err(anyhow::anyhow!("Fill block before target block"));
+            return Err(PriceCurveError::FillBlockBeforeTarget);
         }
         let blocks_passed = fill_block.saturating_sub(target_block);
 
@@ -672,7 +713,7 @@ impl HybridOrder {
 
     /// Calculate the scaling factor value based on block progression through the price curve
     /// This mirrors PriceCurveLib.getCalculatedValues from Solidity
-    fn get_calculated_values(parameters: &[U256], blocks_passed: U256) -> Result<U256> {
+    fn get_calculated_values(parameters: &[U256], blocks_passed: U256) -> Result<U256, PriceCurveError> {
         if parameters.is_empty() {
             return Ok(BASE_SCALING_FACTOR);
         }
@@ -709,7 +750,7 @@ impl HybridOrder {
                         let zero_duration_scaling = prev_element.scaling_factor;
 
                         if !shares_scaling_direction(zero_duration_scaling, scaling_factor) {
-                            return Err(anyhow::anyhow!("Invalid price curve parameters"));
+                            return Err(PriceCurveError::InvalidPriceCurveParameters);
                         }
 
                         current_scaling_factor = locate_current_amount(
@@ -733,7 +774,7 @@ impl HybridOrder {
                 };
 
                 if !shares_scaling_direction(scaling_factor, end_scaling_factor) {
-                    return Err(anyhow::anyhow!("Invalid price curve parameters"));
+                    return Err(PriceCurveError::InvalidPriceCurveParameters);
                 }
 
                 current_scaling_factor = locate_current_amount(
@@ -752,7 +793,7 @@ impl HybridOrder {
 
         // Exceeded total blocks
         if blocks_passed >= blocks_counted {
-            return Err(anyhow::anyhow!("Price curve blocks exceeded"));
+            return Err(PriceCurveError::PriceCurveBlocksExceeded);
         }
 
         Ok(current_scaling_factor)
@@ -1541,5 +1582,736 @@ mod tests {
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), start_amount);
         }
+    }
+
+    // ============================================================================
+    // HybridOrder resolve() tests - mirroring Solidity contract tests
+    // ============================================================================
+
+    use alloy_primitives::Address;
+
+    /// Helper to create a basic HybridOrder for testing
+    fn create_test_hybrid_order(
+        input_amount: U256,
+        output_amount: U256,
+        scaling_factor: U256,
+        price_curve: Vec<U256>,
+        auction_start_block: U256,
+        deadline: U256,
+    ) -> HybridOrder {
+        HybridOrder {
+            info: OrderInfo {
+                reactor: Address::ZERO,
+                swapper: Address::ZERO,
+                nonce: U256::ZERO,
+                deadline,
+                additionalValidationContract: Address::ZERO,
+                additionalValidationData: vec![].into(),
+            },
+            cosigner: Address::ZERO,
+            input: HybridInput {
+                token: Address::ZERO,
+                maxAmount: input_amount,
+            },
+            outputs: vec![HybridOutput {
+                token: Address::ZERO,
+                minAmount: output_amount,
+                recipient: Address::ZERO,
+            }],
+            auctionStartBlock: auction_start_block,
+            baselinePriorityFee: U256::ZERO,
+            scalingFactor: scaling_factor,
+            priceCurve: price_curve,
+            cosignerData: HybridCosignerData {
+                auctionTargetBlock: U256::ZERO,
+                supplementalPriceCurve: vec![],
+            },
+            cosignature: vec![].into(),
+        }
+    }
+
+    /// Helper to create price curve element: (duration << 240) | scaling_factor
+    fn price_curve_element(duration: u16, scaling_factor: U256) -> U256 {
+        (U256::from(duration) << 240) | scaling_factor
+    }
+
+    #[test]
+    fn test_hybrid_empty_price_curve_returns_neutral_scaling() {
+        // Test: test_EmptyPriceCurve_ReturnsNeutralScaling
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            vec![], // Empty price curve
+            U256::ZERO, // No auction start block
+            U256::from(u64::MAX), // Far future deadline
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // With neutral scaling and empty curve, amounts should be unchanged
+                assert_eq!(resolved.input.amount, input_amount);
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_dutch_auction_midway() {
+        // Test: test_DeriveAmounts_WithPriceCurve_Dutch
+        // Price curve: 10 blocks at 1.2x scaling
+        // At block 5: interpolating from 1.2 to 1.0
+        // Expected: 1.2 - (0.2 * 5/10) = 1.1
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_min = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+
+        let price_curve = vec![
+            price_curve_element(10, U256::from(1_200_000_000_000_000_000u64)), // 1.2e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Fill at block 105 (5 blocks into auction)
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-in mode (scaling > 1): input fixed, output scaled up
+                assert_eq!(resolved.input.amount, input_amount);
+
+                // Expected scaling: 1.1e18
+                // mulWadUp(0.95e18, 1.1e18) = (0.95 * 1.1 + 1e18 - 1) / 1e18 = 1.045e18
+                let expected_scaling = U256::from(1_100_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_dutch_auction_non_neutral_end() {
+        // Test: test_DeriveAmounts_WithPriceCurve_Dutch_nonNeutralEndScalingFactor
+        // Price curve: 10 blocks at 1.2x, then zero-duration at 1.1x
+        // At block 5: interpolating from 1.2 to 1.1
+        // Expected: 1.2 - (0.1 * 5/10) = 1.15
+        let input_amount = U256::from(1_000_000_000_000_000_000u64);
+        let output_min = U256::from(950_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(10, U256::from(1_200_000_000_000_000_000u64)), // 1.2e18
+            price_curve_element(0, U256::from(1_100_000_000_000_000_000u64)),  // 1.1e18 (zero duration)
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                assert_eq!(resolved.input.amount, input_amount);
+                let expected_scaling = U256::from(1_150_000_000_000_000_000u64); // 1.15e18
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_reverse_dutch_auction() {
+        // Test: test_DeriveAmounts_WithPriceCurve_ReverseDutch
+        // Price curve: 10 blocks at 0.8x, then 10 blocks at 1.0x
+        // At block 5: interpolating from 0.8 to 1.0
+        // Expected: 0.8 + (0.2 * 5/10) = 0.9
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(950_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(10, U256::from(800_000_000_000_000_000u64)),   // 0.8e18
+            price_curve_element(10, U256::from(1_000_000_000_000_000_000u64)), // 1.0e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-out mode (scaling < 1): output fixed, input scaled down
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+
+                let expected_scaling = U256::from(900_000_000_000_000_000u64); // 0.9e18
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_exact_out_with_price_curve() {
+        // Test: test_DeriveAmounts_WithPriceCurve
+        // Price curve: 3 blocks at 0.8x, 10 blocks at 0.6x, 10 blocks at 0
+        // At block 5: 2 blocks into second segment
+        // Interpolating from 0.6 to 0
+        // Expected: 0.6 - (0.6 * 2/10) = 0.48
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(950_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(3, U256::from(800_000_000_000_000_000u64)),  // 0.8e18
+            price_curve_element(10, U256::from(600_000_000_000_000_000u64)), // 0.6e18
+            price_curve_element(10, U256::ZERO), // 0
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+                let expected_scaling = U256::from(480_000_000_000_000_000u64); // 0.48e18
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_expired_order() {
+        let order = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            vec![],
+            U256::ZERO,
+            U256::from(1000), // Deadline in the past
+        );
+
+        let resolution = order.resolve(100, 2000, U256::ZERO); // timestamp > deadline
+        assert!(matches!(resolution, OrderResolution::Expired));
+    }
+
+    #[test]
+    fn test_hybrid_not_fillable_yet() {
+        let order = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            vec![price_curve_element(10, U256::from(1_200_000_000_000_000_000u64))],
+            U256::from(200), // Auction starts at block 200
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO); // Current block 100 < 200
+        assert!(matches!(resolution, OrderResolution::NotFillableYet(_)));
+    }
+
+    #[test]
+    fn test_hybrid_price_curve_blocks_exceeded() {
+        // Test: test_RevertsExceedingTotalBlockDuration
+        let price_curve = vec![
+            price_curve_element(10, U256::from(1_200_000_000_000_000_000u64)), // 10 blocks only
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Try to fill at block 110 (exceeds 10 block duration: valid is 100-109)
+        let resolution = order.resolve(110, 1000, U256::ZERO);
+        assert!(matches!(resolution, OrderResolution::Invalid));
+    }
+
+    #[test]
+    fn test_hybrid_invalid_target_block_designation() {
+        // Test: test_DeriveAmounts_InvalidTargetBlockDesignation
+        // Having a non-empty price curve but auctionStartBlock = 0 is invalid.
+        // There's no reference point to calculate how many blocks have passed.
+        let price_curve = vec![
+            price_curve_element(0, BASE_SCALING_FACTOR), // Has price curve but no target block
+        ];
+
+        let order = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            price_curve,
+            U256::ZERO, // target block = 0 with non-empty price curve
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+        assert!(matches!(resolution, OrderResolution::InvalidTargetBlockDesignation));
+    }
+
+    #[test]
+    fn test_hybrid_inconsistent_scaling_directions() {
+        // Test: test_RevertsInconsistentScalingDirections
+        // Price curve elements must share scaling direction
+        let price_curve = vec![
+            price_curve_element(10, U256::from(1_500_000_000_000_000_000u64)), // 1.5e18 (>1)
+            price_curve_element(10, U256::from(500_000_000_000_000_000u64)),   // 0.5e18 (<1) - INVALID!
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+        assert!(matches!(resolution, OrderResolution::Invalid));
+    }
+
+    #[test]
+    fn test_hybrid_zero_scaling_factor_exact_out() {
+        // Test: test_ZeroScalingFactor_ExactOut
+        // At target block, scaling is 0, so input should be 0
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(10, U256::ZERO), // Start at 0
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                assert_eq!(resolved.input.amount, U256::ZERO);
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_exact_in_with_scaling_factor() {
+        // Test exact-in mode with scalingFactor > 1e18
+        let input_amount = U256::from(1_000_000_000_000_000_000u64);
+        let output_min = U256::from(1_000_000_000_000_000_000u64);
+        let scaling_factor = U256::from(1_300_000_000_000_000_000u64); // 1.3e18
+
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            scaling_factor,
+            vec![], // Empty price curve
+            U256::ZERO,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-in: input fixed, output scaled
+                assert_eq!(resolved.input.amount, input_amount);
+                // With empty price curve, scaling = 1e18
+                // Output = minAmount * 1e18 / 1e18 = minAmount
+                assert_eq!(resolved.outputs[0].amount, output_min);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_exact_out_with_scaling_factor() {
+        // Test exact-out mode with scalingFactor < 1e18
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(1_000_000_000_000_000_000u64);
+        let scaling_factor = U256::from(700_000_000_000_000_000u64); // 0.7e18
+
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            scaling_factor,
+            vec![], // Empty price curve
+            U256::ZERO,
+            U256::from(u64::MAX),
+        );
+
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-out: output fixed, input scaled
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+                // With empty price curve, scaling = 1e18
+                // Input = maxAmount * 1e18 / 1e18 = maxAmount
+                assert_eq!(resolved.input.amount, input_max);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_inverted_auction_price_increases() {
+        // Test: test_InvertedAuction_PriceIncreasesOverTime
+        // Price increases from 0.5x to 1x over 100 blocks
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(100, U256::from(500_000_000_000_000_000u64)), // 0.5e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // At block 100: scaling = 0.5x
+        let resolution = order.resolve(100, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_input = mul_wad(input_max, U256::from(500_000_000_000_000_000u64));
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // At block 150: midpoint, scaling = 0.75x
+        let resolution = order.resolve(150, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_input = mul_wad(input_max, U256::from(750_000_000_000_000_000u64));
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // At block 199: close to 1.0x (block 99 relative to auction start)
+        // Interpolating from 0.5 to 1.0: 0.5 + (0.5 * 99/100) = 0.995
+        let resolution = order.resolve(199, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // 0.5e18 + (0.5e18 * 99 / 100) = 0.5e18 + 0.495e18 = 0.995e18
+                let expected_scaling = U256::from(995_000_000_000_000_000u64);
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_step_function_with_plateaus() {
+        // Test: test_StepFunctionWithPlateaus
+        // 50 blocks at 1.5x, 50 blocks at 1.2x, 50 blocks at 1.0x
+        let input_amount = U256::from(1_000_000_000_000_000_000u64);
+        let output_min = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(50, U256::from(1_500_000_000_000_000_000u64)), // 1.5e18
+            price_curve_element(50, U256::from(1_200_000_000_000_000_000u64)), // 1.2e18
+            price_curve_element(50, U256::from(1_000_000_000_000_000_000u64)), // 1.0e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Block 125: 25 blocks into first segment
+        // Interpolating from 1.5 to 1.2: 1.5 - (0.3 * 25/50) = 1.35
+        let resolution = order.resolve(125, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_350_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 150: start of second segment
+        // Interpolating from 1.2 to 1.0: 1.2 - (0.2 * 0/50) = 1.2
+        let resolution = order.resolve(150, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_200_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 175: 25 blocks into second segment
+        // Interpolating from 1.2 to 1.0: 1.2 - (0.2 * 25/50) = 1.1
+        let resolution = order.resolve(175, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_100_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 200: start of third segment (block 100 relative to auction start)
+        // Interpolating from 1.0 to 1.0: 1.0 - (0 * 0/50) = 1.0
+        let resolution = order.resolve(200, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_000_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_complex_multi_phase_curve() {
+        // Test: test_Doc_ComplexMultiPhaseCurve
+        // 30 blocks at 0.5x, 40 blocks at 0.7x, 30 blocks at 0.8x
+        let input_max = U256::from(1_000_000_000_000_000_000u64);
+        let output_amount = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(30, U256::from(500_000_000_000_000_000u64)),  // 0.5e18
+            price_curve_element(40, U256::from(700_000_000_000_000_000u64)),  // 0.7e18
+            price_curve_element(30, U256::from(800_000_000_000_000_000u64)),  // 0.8e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Block 115: 15 blocks into first segment
+        // Interpolating from 0.5 to 0.7: 0.5 + (0.2 * 15/30) = 0.6
+        let resolution = order.resolve(115, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(600_000_000_000_000_000u64);
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 150: 20 blocks into second segment
+        // Interpolating from 0.7 to 0.8: 0.7 + (0.1 * 20/40) = 0.75
+        let resolution = order.resolve(150, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(750_000_000_000_000_000u64);
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 185: 15 blocks into third segment
+        // Interpolating from 0.8 to 1.0: 0.8 + (0.2 * 15/30) = 0.9
+        let resolution = order.resolve(185, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(900_000_000_000_000_000u64);
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 199: last valid block (block 99 relative to auction start)
+        // Interpolating from 0.8 to 1.0: 0.8 + (0.2 * 29/30) = 0.9933...
+        // Integer math: 0.8e18 + (0.2e18 * 29 / 30) = 0.8e18 + 193333333333333333 = 993333333333333333
+        let resolution = order.resolve(199, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // 0.8e18 + (0.2e18 * 29 / 30) = 800000000000000000 + 193333333333333333
+                let expected_scaling = U256::from(993_333_333_333_333_333u64);
+                let expected_input = mul_wad(input_max, expected_scaling);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_zero_duration_instantaneous_price_point() {
+        // Test: test_ZeroDuration_InstantaneousPricePoint
+        // 10 blocks at 1.2x, zero-duration at 1.5x, 20 blocks ending at 1x
+        let input_amount = U256::from(1_000_000_000_000_000_000u64);
+        let output_min = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(10, U256::from(1_200_000_000_000_000_000u64)), // 1.2e18
+            price_curve_element(0, U256::from(1_500_000_000_000_000_000u64)),  // 1.5e18 (zero duration)
+            price_curve_element(20, U256::from(1_000_000_000_000_000_000u64)), // 1.0e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Block 105: 5 blocks into first segment
+        // Interpolating from 1.2 towards 1.5: 1.2 + (0.3 * 5/10) = 1.35
+        let resolution = order.resolve(105, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_350_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 110: exactly at zero-duration element
+        let resolution = order.resolve(110, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_500_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn test_mul_wad_functions() {
+        // Test mul_wad (rounds down)
+        let a = U256::from(1_000_000_000_000_000_000u64); // 1e18
+        let b = U256::from(500_000_000_000_000_000u64);   // 0.5e18
+
+        let result = mul_wad(a, b);
+        assert_eq!(result, U256::from(500_000_000_000_000_000u64)); // 0.5e18
+
+        // Test mul_wad_up (rounds up)
+        let result_up = mul_wad_up(a, b);
+        assert_eq!(result_up, U256::from(500_000_000_000_000_000u64)); // 0.5e18 (no rounding needed)
+
+        // Test with non-exact division
+        let c = U256::from(1_000_000_000_000_000_001u64); // 1e18 + 1
+        let result_down = mul_wad(c, b);
+        let result_up = mul_wad_up(c, b);
+        assert!(result_up >= result_down);
+    }
+
+    #[test]
+    fn test_price_curve_element_parsing() {
+        // Test parsing price curve element
+        let duration = 100u16;
+        let scaling = U256::from(1_500_000_000_000_000_000u64); // 1.5e18
+
+        let element = price_curve_element(duration, scaling);
+        let parsed = PriceCurveElement::from_u256(element);
+
+        assert_eq!(parsed.duration, duration);
+        assert_eq!(parsed.scaling_factor, scaling);
+    }
+
+    #[test]
+    fn test_shares_scaling_direction() {
+        // Both > 1e18
+        assert!(shares_scaling_direction(
+            U256::from(1_500_000_000_000_000_000u64),
+            U256::from(1_200_000_000_000_000_000u64)
+        ));
+
+        // Both < 1e18
+        assert!(shares_scaling_direction(
+            U256::from(500_000_000_000_000_000u64),
+            U256::from(800_000_000_000_000_000u64)
+        ));
+
+        // One is exactly 1e18
+        assert!(shares_scaling_direction(
+            BASE_SCALING_FACTOR,
+            U256::from(1_500_000_000_000_000_000u64)
+        ));
+
+        // Different directions - INVALID
+        assert!(!shares_scaling_direction(
+            U256::from(1_500_000_000_000_000_000u64),
+            U256::from(500_000_000_000_000_000u64)
+        ));
     }
 }
