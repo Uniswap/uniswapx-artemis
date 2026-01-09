@@ -1637,7 +1637,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_empty_price_curve_returns_neutral_scaling() {
-        // Test: test_EmptyPriceCurve_ReturnsNeutralScaling
         let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
         let output_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
 
@@ -1664,7 +1663,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_dutch_auction_midway() {
-        // Test: test_DeriveAmounts_WithPriceCurve_Dutch
         // Price curve: 10 blocks at 1.2x scaling
         // At block 5: interpolating from 1.2 to 1.0
         // Expected: 1.2 - (0.2 * 5/10) = 1.1
@@ -1705,7 +1703,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_dutch_auction_non_neutral_end() {
-        // Test: test_DeriveAmounts_WithPriceCurve_Dutch_nonNeutralEndScalingFactor
         // Price curve: 10 blocks at 1.2x, then zero-duration at 1.1x
         // At block 5: interpolating from 1.2 to 1.1
         // Expected: 1.2 - (0.1 * 5/10) = 1.15
@@ -1742,7 +1739,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_reverse_dutch_auction() {
-        // Test: test_DeriveAmounts_WithPriceCurve_ReverseDutch
         // Price curve: 10 blocks at 0.8x, then 10 blocks at 1.0x
         // At block 5: interpolating from 0.8 to 1.0
         // Expected: 0.8 + (0.2 * 5/10) = 0.9
@@ -1781,7 +1777,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_exact_out_with_price_curve() {
-        // Test: test_DeriveAmounts_WithPriceCurve
         // Price curve: 3 blocks at 0.8x, 10 blocks at 0.6x, 10 blocks at 0
         // At block 5: 2 blocks into second segment
         // Interpolating from 0.6 to 0
@@ -1840,7 +1835,7 @@ mod tests {
             U256::from(1_000_000_000_000_000_000u64),
             BASE_SCALING_FACTOR,
             vec![price_curve_element(10, U256::from(1_200_000_000_000_000_000u64))],
-            U256::from(200), // Auction starts at block 200
+            U256::from(200), // Auction starts at block 200 (future block)
             U256::from(u64::MAX),
         );
 
@@ -1850,9 +1845,8 @@ mod tests {
 
     #[test]
     fn test_hybrid_price_curve_blocks_exceeded() {
-        // Test: test_RevertsExceedingTotalBlockDuration
         let price_curve = vec![
-            price_curve_element(10, U256::from(1_200_000_000_000_000_000u64)), // 10 blocks only
+            price_curve_element(100, U256::from(800_000_000_000_000_000u64)), // 0.8e18, 100 blocks
         ];
 
         let auction_start_block = U256::from(100);
@@ -1865,14 +1859,13 @@ mod tests {
             U256::from(u64::MAX),
         );
 
-        // Try to fill at block 110 (exceeds 10 block duration: valid is 100-109)
-        let resolution = order.resolve(110, 1000, U256::ZERO);
+        // At block 200 (auctionStart + 100): exceeds total duration, valid is 100-199
+        let resolution = order.resolve(200, 1000, U256::ZERO);
         assert!(matches!(resolution, OrderResolution::Invalid));
     }
 
     #[test]
     fn test_hybrid_invalid_target_block_designation() {
-        // Test: test_DeriveAmounts_InvalidTargetBlockDesignation
         // Having a non-empty price curve but auctionStartBlock = 0 is invalid.
         // There's no reference point to calculate how many blocks have passed.
         let price_curve = vec![
@@ -1894,7 +1887,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_inconsistent_scaling_directions() {
-        // Test: test_RevertsInconsistentScalingDirections
         // Price curve elements must share scaling direction
         let price_curve = vec![
             price_curve_element(10, U256::from(1_500_000_000_000_000_000u64)), // 1.5e18 (>1)
@@ -1917,7 +1909,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_zero_scaling_factor_exact_out() {
-        // Test: test_ZeroScalingFactor_ExactOut
         // At target block, scaling is 0, so input should be 0
         let input_max = U256::from(1_000_000_000_000_000_000u64);
         let output_amount = U256::from(1_000_000_000_000_000_000u64);
@@ -1948,11 +1939,11 @@ mod tests {
     }
 
     #[test]
-    fn test_hybrid_exact_in_with_scaling_factor() {
-        // Test exact-in mode with scalingFactor > 1e18
-        let input_amount = U256::from(1_000_000_000_000_000_000u64);
-        let output_min = U256::from(1_000_000_000_000_000_000u64);
-        let scaling_factor = U256::from(1_300_000_000_000_000_000u64); // 1.3e18
+    fn test_hybrid_derive_amounts_exact_in() {
+        // Empty price curve, scalingFactor = 1.5e18, priorityFee = 2 wei
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_min = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+        let scaling_factor = U256::from(1_500_000_000_000_000_000u64); // 1.5e18
 
         let order = create_test_hybrid_order(
             input_amount,
@@ -1963,26 +1954,30 @@ mod tests {
             U256::from(u64::MAX),
         );
 
-        let resolution = order.resolve(100, 1000, U256::ZERO);
+        // priority_fee = 2 wei above baseline
+        let priority_fee = U256::from(2);
+        let resolution = order.resolve(100, 1000, priority_fee);
 
         match resolution {
             OrderResolution::Resolved(resolved) => {
-                // Exact-in: input fixed, output scaled
+                // Exact-in: input fixed
                 assert_eq!(resolved.input.amount, input_amount);
-                // With empty price curve, scaling = 1e18
-                // Output = minAmount * 1e18 / 1e18 = minAmount
-                assert_eq!(resolved.outputs[0].amount, output_min);
+                // scalingMultiplier = 1e18 + ((1.5e18 - 1e18) * 2) = 2e18
+                let scaling_multiplier = BASE_SCALING_FACTOR
+                    + (scaling_factor - BASE_SCALING_FACTOR) * U256::from(2);
+                let expected_output = mul_wad_up(output_min, scaling_multiplier);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
             }
             _ => panic!("Expected Resolved, got {:?}", resolution),
         }
     }
 
     #[test]
-    fn test_hybrid_exact_out_with_scaling_factor() {
-        // Test exact-out mode with scalingFactor < 1e18
-        let input_max = U256::from(1_000_000_000_000_000_000u64);
-        let output_amount = U256::from(1_000_000_000_000_000_000u64);
-        let scaling_factor = U256::from(700_000_000_000_000_000u64); // 0.7e18
+    fn test_hybrid_derive_amounts_exact_out() {
+        // Empty price curve, scalingFactor = 0.5e18, priorityFee = 2 wei
+        let input_max = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_amount = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+        let scaling_factor = U256::from(500_000_000_000_000_000u64); // 0.5e18
 
         let order = create_test_hybrid_order(
             input_max,
@@ -1993,15 +1988,121 @@ mod tests {
             U256::from(u64::MAX),
         );
 
-        let resolution = order.resolve(100, 1000, U256::ZERO);
+        // priority_fee = 2 wei above baseline
+        let priority_fee = U256::from(2);
+        let resolution = order.resolve(100, 1000, priority_fee);
 
         match resolution {
             OrderResolution::Resolved(resolved) => {
-                // Exact-out: output fixed, input scaled
+                // Exact-out: output fixed
                 assert_eq!(resolved.outputs[0].amount, output_amount);
-                // With empty price curve, scaling = 1e18
-                // Input = maxAmount * 1e18 / 1e18 = maxAmount
-                assert_eq!(resolved.input.amount, input_max);
+                // scalingMultiplier = 1e18 - ((1e18 - 0.5e18) * 2) = 0
+                let scaling_multiplier = BASE_SCALING_FACTOR
+                    .saturating_sub((BASE_SCALING_FACTOR - scaling_factor) * U256::from(2));
+                let expected_input = mul_wad(input_max, scaling_multiplier);
+                assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_derive_amounts_extreme_priority_fee() {
+        // Empty price curve, scalingFactor = 1.5e18, priorityFee = 10 wei
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_min = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+        let scaling_factor = U256::from(1_500_000_000_000_000_000u64); // 1.5e18
+
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            scaling_factor,
+            vec![], // Empty price curve
+            U256::ZERO,
+            U256::from(u64::MAX),
+        );
+
+        // priority_fee = 10 wei above baseline
+        let priority_fee = U256::from(10);
+        let resolution = order.resolve(100, 1000, priority_fee);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-in: input fixed
+                assert_eq!(resolved.input.amount, input_amount);
+                // scalingMultiplier = 1e18 + ((1.5e18 - 1e18) * 10) = 6e18
+                let scaling_multiplier = BASE_SCALING_FACTOR
+                    + (scaling_factor - BASE_SCALING_FACTOR) * U256::from(10);
+                let expected_output = mul_wad_up(output_min, scaling_multiplier);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_derive_amounts_realistic_exact_in() {
+        // Empty price curve, scalingFactor = 1.0000000001e18, priorityFee = 5 gwei
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_min = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+        let scaling_factor = U256::from(1_000_000_000_100_000_000u64); // 1.0000000001e18
+
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            scaling_factor,
+            vec![], // Empty price curve
+            U256::ZERO,
+            U256::from(u64::MAX),
+        );
+
+        // priority_fee = 5 gwei above baseline
+        let priority_fee = U256::from(5_000_000_000u64); // 5 gwei
+        let resolution = order.resolve(100, 1000, priority_fee);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-in: input fixed
+                assert_eq!(resolved.input.amount, input_amount);
+                // scalingMultiplier = 1e18 + ((1.0000000001e18 - 1e18) * 5 gwei)
+                let scaling_multiplier = BASE_SCALING_FACTOR
+                    + (scaling_factor - BASE_SCALING_FACTOR) * priority_fee;
+                let expected_output = mul_wad_up(output_min, scaling_multiplier);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved, got {:?}", resolution),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_derive_amounts_realistic_exact_out() {
+        // Empty price curve, scalingFactor = 0.9999999999e18, priorityFee = 5 gwei
+        let input_max = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_amount = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+        let scaling_factor = U256::from(999_999_999_900_000_000u64); // 0.9999999999e18
+
+        let order = create_test_hybrid_order(
+            input_max,
+            output_amount,
+            scaling_factor,
+            vec![], // Empty price curve
+            U256::ZERO,
+            U256::from(u64::MAX),
+        );
+
+        // priority_fee = 5 gwei above baseline
+        let priority_fee = U256::from(5_000_000_000u64); // 5 gwei
+        let resolution = order.resolve(100, 1000, priority_fee);
+
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                // Exact-out: output fixed
+                assert_eq!(resolved.outputs[0].amount, output_amount);
+                // scalingMultiplier = 1e18 - ((1e18 - 0.9999999999e18) * 5 gwei)
+                let scaling_multiplier = BASE_SCALING_FACTOR
+                    .saturating_sub((BASE_SCALING_FACTOR - scaling_factor) * priority_fee);
+                let expected_input = mul_wad(input_max, scaling_multiplier);
+                assert_eq!(resolved.input.amount, expected_input);
             }
             _ => panic!("Expected Resolved, got {:?}", resolution),
         }
@@ -2009,7 +2110,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_inverted_auction_price_increases() {
-        // Test: test_InvertedAuction_PriceIncreasesOverTime
         // Price increases from 0.5x to 1x over 100 blocks
         let input_max = U256::from(1_000_000_000_000_000_000u64);
         let output_amount = U256::from(1_000_000_000_000_000_000u64);
@@ -2064,7 +2164,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_step_function_with_plateaus() {
-        // Test: test_StepFunctionWithPlateaus
         // 50 blocks at 1.5x, 50 blocks at 1.2x, 50 blocks at 1.0x
         let input_amount = U256::from(1_000_000_000_000_000_000u64);
         let output_min = U256::from(1_000_000_000_000_000_000u64);
@@ -2136,7 +2235,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_complex_multi_phase_curve() {
-        // Test: test_Doc_ComplexMultiPhaseCurve
         // 30 blocks at 0.5x, 40 blocks at 0.7x, 30 blocks at 0.8x
         let input_max = U256::from(1_000_000_000_000_000_000u64);
         let output_amount = U256::from(1_000_000_000_000_000_000u64);
@@ -2210,7 +2308,6 @@ mod tests {
 
     #[test]
     fn test_hybrid_zero_duration_instantaneous_price_point() {
-        // Test: test_ZeroDuration_InstantaneousPricePoint
         // 10 blocks at 1.2x, zero-duration at 1.5x, 20 blocks ending at 1x
         let input_amount = U256::from(1_000_000_000_000_000_000u64);
         let output_min = U256::from(1_000_000_000_000_000_000u64);
