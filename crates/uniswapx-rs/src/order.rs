@@ -2234,8 +2234,8 @@ mod tests {
     }
 
     #[test]
-    fn test_hybrid_complex_multi_phase_curve() {
-        // 30 blocks at 0.5x, 40 blocks at 0.7x, 30 blocks at 0.8x
+    fn test_hybrid_complex_multi_phase_curve_exact_out() {
+        // 30 blocks at 0.5x, 40 blocks at 0.7x, 30 blocks at 0.8x (exact-out, scaling up)
         let input_max = U256::from(1_000_000_000_000_000_000u64);
         let output_amount = U256::from(1_000_000_000_000_000_000u64);
 
@@ -2301,6 +2301,79 @@ mod tests {
                 let expected_scaling = U256::from(993_333_333_333_333_333u64);
                 let expected_input = mul_wad(input_max, expected_scaling);
                 assert_eq!(resolved.input.amount, expected_input);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn test_hybrid_complex_multi_phase_curve_exact_in() {
+        // 30 blocks at 1.5x, 40 blocks at 1.3x, 30 blocks at 1.1x (exact-in, scaling down)
+        let input_amount = U256::from(1_000_000_000_000_000_000u64);
+        let output_min = U256::from(1_000_000_000_000_000_000u64);
+
+        let price_curve = vec![
+            price_curve_element(30, U256::from(1_500_000_000_000_000_000u64)), // 1.5e18
+            price_curve_element(40, U256::from(1_300_000_000_000_000_000u64)), // 1.3e18
+            price_curve_element(30, U256::from(1_100_000_000_000_000_000u64)), // 1.1e18
+        ];
+
+        let auction_start_block = U256::from(100);
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_min,
+            BASE_SCALING_FACTOR,
+            price_curve,
+            auction_start_block,
+            U256::from(u64::MAX),
+        );
+
+        // Block 115: 15 blocks into first segment
+        // Interpolating from 1.5 to 1.3: 1.5 - (0.2 * 15/30) = 1.4
+        let resolution = order.resolve(115, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                assert_eq!(resolved.input.amount, input_amount);
+                let expected_scaling = U256::from(1_400_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 150: 20 blocks into second segment
+        // Interpolating from 1.3 to 1.1: 1.3 - (0.2 * 20/40) = 1.2
+        let resolution = order.resolve(150, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_200_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 185: 15 blocks into third segment
+        // Interpolating from 1.1 to 1.0: 1.1 - (0.1 * 15/30) = 1.05
+        let resolution = order.resolve(185, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_050_000_000_000_000_000u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
+            }
+            _ => panic!("Expected Resolved"),
+        }
+
+        // Block 199: last valid block (block 99 relative to auction start)
+        // Interpolating from 1.1 to 1.0: 1.1 - (0.1 * 29/30) = 1.0033...
+        // Integer math: 1.1e18 - (0.1e18 * 29 / 30) = 1.1e18 - 96666666666666666 = 1003333333333333334
+        let resolution = order.resolve(199, 1000, U256::ZERO);
+        match resolution {
+            OrderResolution::Resolved(resolved) => {
+                let expected_scaling = U256::from(1_003_333_333_333_333_334u64);
+                let expected_output = mul_wad_up(output_min, expected_scaling);
+                assert_eq!(resolved.outputs[0].amount, expected_output);
             }
             _ => panic!("Expected Resolved"),
         }
