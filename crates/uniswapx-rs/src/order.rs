@@ -282,8 +282,24 @@ impl Order {
                 } else if order.scalingFactor < BASE_SCALING_FACTOR {
                     TradeType::ExactOut
                 } else {
-                    // Neutral scaling factor - default to exact-in
-                    TradeType::ExactIn
+                    let effective_curve = if !order.cosignerData.supplementalPriceCurve.is_empty() {
+                        &order.cosignerData.supplementalPriceCurve
+                    } else {
+                        &order.priceCurve
+                    };
+
+                    if effective_curve.iter().any(|value| {
+                        PriceCurveElement::from_u256(*value).scaling_factor > BASE_SCALING_FACTOR
+                    }) {
+                        TradeType::ExactIn
+                    } else if effective_curve.iter().any(|value| {
+                        PriceCurveElement::from_u256(*value).scaling_factor < BASE_SCALING_FACTOR
+                    }) {
+                        TradeType::ExactOut
+                    } else {
+                        // Neutral curve - default to exact-in
+                        TradeType::ExactIn
+                    }
                 }
             }
         }
@@ -528,6 +544,9 @@ impl V3DutchOrder {
 
 /// Base scaling factor (1e18) used as neutral point for hybrid auctions
 pub const BASE_SCALING_FACTOR: U256 = Uint::from_limbs([1_000_000_000_000_000_000u64, 0, 0, 0]);
+/// Scaling delta that mirrors 1 MPS per wei of priority fee in priority orders.
+pub const HYBRID_MPS_EQUIVALENT_SCALING_DELTA: U256 =
+    Uint::from_limbs([100_000_000_000u64, 0, 0, 0]);
 
 /// Price curve element: upper 16 bits = duration (blocks), lower 240 bits = scaling factor
 #[derive(Debug, Clone, Copy)]
@@ -2042,10 +2061,11 @@ mod tests {
 
     #[test]
     fn test_hybrid_derive_amounts_realistic_exact_in() {
-        // Empty price curve, scalingFactor = 1.0000000001e18, priorityFee = 5 gwei
+        // Empty price curve, scalingFactor = 1e18 + 1e11 (1 MPS per wei), priorityFee = 5 gwei
         let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
         let output_min = U256::from(950_000_000_000_000_000u64); // 0.95 ether
-        let scaling_factor = U256::from(1_000_000_000_100_000_000u64); // 1.0000000001e18
+        let scaling_factor = BASE_SCALING_FACTOR
+            .saturating_add(HYBRID_MPS_EQUIVALENT_SCALING_DELTA);
 
         let order = create_test_hybrid_order(
             input_amount,
@@ -2064,7 +2084,7 @@ mod tests {
             OrderResolution::Resolved(resolved) => {
                 // Exact-in: input fixed
                 assert_eq!(resolved.input.amount, input_amount);
-                // scalingMultiplier = 1e18 + ((1.0000000001e18 - 1e18) * 5 gwei)
+                // scalingMultiplier = 1e18 + (1e11 * 5 gwei)
                 let scaling_multiplier = BASE_SCALING_FACTOR
                     + (scaling_factor - BASE_SCALING_FACTOR) * priority_fee;
                 let expected_output = mul_wad_up(output_min, scaling_multiplier);
@@ -2076,10 +2096,11 @@ mod tests {
 
     #[test]
     fn test_hybrid_derive_amounts_realistic_exact_out() {
-        // Empty price curve, scalingFactor = 0.9999999999e18, priorityFee = 5 gwei
+        // Empty price curve, scalingFactor = 1e18 - 1e11 (1 MPS per wei), priorityFee = 5 gwei
         let input_max = U256::from(1_000_000_000_000_000_000u64); // 1 ether
         let output_amount = U256::from(950_000_000_000_000_000u64); // 0.95 ether
-        let scaling_factor = U256::from(999_999_999_900_000_000u64); // 0.9999999999e18
+        let scaling_factor = BASE_SCALING_FACTOR
+            .saturating_sub(HYBRID_MPS_EQUIVALENT_SCALING_DELTA);
 
         let order = create_test_hybrid_order(
             input_max,
@@ -2098,7 +2119,7 @@ mod tests {
             OrderResolution::Resolved(resolved) => {
                 // Exact-out: output fixed
                 assert_eq!(resolved.outputs[0].amount, output_amount);
-                // scalingMultiplier = 1e18 - ((1e18 - 0.9999999999e18) * 5 gwei)
+                // scalingMultiplier = 1e18 - (1e11 * 5 gwei)
                 let scaling_multiplier = BASE_SCALING_FACTOR
                     .saturating_sub((BASE_SCALING_FACTOR - scaling_factor) * priority_fee);
                 let expected_input = mul_wad(input_max, scaling_multiplier);
@@ -2482,6 +2503,50 @@ mod tests {
         assert!(!shares_scaling_direction(
             U256::from(1_500_000_000_000_000_000u64),
             U256::from(500_000_000_000_000_000u64)
+        ));
+    }
+
+    #[test]
+    fn test_hybrid_trade_type_from_curve_direction() {
+        let order_exact_out = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            vec![price_curve_element(10, U256::from(800_000_000_000_000_000u64))],
+            U256::from(100),
+            U256::from(u64::MAX),
+        );
+        assert!(matches!(
+            Order::HybridOrder(order_exact_out).trade_type(),
+            TradeType::ExactOut
+        ));
+
+        let order_exact_in = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            vec![price_curve_element(10, U256::from(1_200_000_000_000_000_000u64))],
+            U256::from(100),
+            U256::from(u64::MAX),
+        );
+        assert!(matches!(
+            Order::HybridOrder(order_exact_in).trade_type(),
+            TradeType::ExactIn
+        ));
+
+        let mut order_with_supplemental = create_test_hybrid_order(
+            U256::from(1_000_000_000_000_000_000u64),
+            U256::from(1_000_000_000_000_000_000u64),
+            BASE_SCALING_FACTOR,
+            vec![],
+            U256::from(100),
+            U256::from(u64::MAX),
+        );
+        order_with_supplemental.cosignerData.supplementalPriceCurve =
+            vec![price_curve_element(10, U256::from(900_000_000_000_000_000u64))];
+        assert!(matches!(
+            Order::HybridOrder(order_with_supplemental).trade_type(),
+            TradeType::ExactOut
         ));
     }
 
