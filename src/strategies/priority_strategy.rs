@@ -267,7 +267,7 @@ impl UniswapXPriorityFill {
             self.min_block_percentage_buffer.unwrap_or(100)
         );
         let order_status = match resolved_order {
-            OrderResolution::Expired | OrderResolution::Invalid => OrderStatus::Done,
+            OrderResolution::Expired | OrderResolution::Invalid | OrderResolution::InvalidTargetBlockDesignation => OrderStatus::Done,
             OrderResolution::NotFillableYet(resolved) => OrderStatus::NotFillableYet(resolved),
             OrderResolution::Resolved(resolved) => OrderStatus::Open(resolved),
         };

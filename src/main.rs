@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
             );
             engine.add_strategy(Box::new(uniswapx_strategy));
         }
-        OrderType::Priority => {
+        OrderType::Priority | OrderType::Hybrid => {
             let priority_strategy = UniswapXPriorityFill::new(
                 client.clone().unwrap(),
                 cloudwatch_client.clone(),

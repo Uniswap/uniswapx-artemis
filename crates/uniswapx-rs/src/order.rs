@@ -2484,4 +2484,35 @@ mod tests {
             U256::from(500_000_000_000_000_000u64)
         ));
     }
+
+    #[test]
+    fn test_hybrid_order_encode_decode_roundtrip() {
+        let input_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ether
+        let output_amount = U256::from(950_000_000_000_000_000u64); // 0.95 ether
+
+        let order = create_test_hybrid_order(
+            input_amount,
+            output_amount,
+            BASE_SCALING_FACTOR,
+            vec![price_curve_element(10, U256::from(1_100_000_000_000_000_000u64))],
+            U256::from(100),
+            U256::from(u64::MAX),
+        );
+
+        // Encode
+        let encoded = order.encode_inner();
+
+        // Print the hex for use in collector tests
+        println!("Encoded HybridOrder hex: 0x{}", hex::encode(&encoded));
+
+        // Decode
+        let decoded = HybridOrder::decode_inner(&encoded, false).expect("Failed to decode");
+
+        // Verify fields match
+        assert_eq!(decoded.input.maxAmount, input_amount);
+        assert_eq!(decoded.outputs[0].minAmount, output_amount);
+        assert_eq!(decoded.scalingFactor, BASE_SCALING_FACTOR);
+        assert_eq!(decoded.auctionStartBlock, U256::from(100));
+        assert_eq!(decoded.priceCurve.len(), 1);
+    }
 }
