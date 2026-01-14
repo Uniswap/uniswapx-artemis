@@ -2,7 +2,7 @@ use alloy::{
     network::AnyNetwork,
     primitives::{BlockHash, BlockNumber, BlockTimestamp},
     providers::{DynProvider, Provider},
-    rpc::types::eth::{BlockTransactionsKind, BlockNumberOrTag},
+    rpc::types::eth::BlockNumberOrTag,
 };
 use anyhow::Result;
 use artemis_core::types::{Collector, CollectorStream};
@@ -57,7 +57,7 @@ impl Collector<NewBlock> for BlockCollector {
                     .then(move |_| {
                         let provider = provider.clone();
                         async move {
-                            match provider.get_block_by_number(BlockNumberOrTag::Latest, BlockTransactionsKind::Full).await {
+                            match provider.get_block_by_number(BlockNumberOrTag::Latest).await {
                                 Ok(Some(block)) => {
                                     let header = &block.header;
                                     Some(NewBlock {

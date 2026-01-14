@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
         let wss_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(wss_client)
+                .connect_client(wss_client)
         ));
         client = Some(wss_provider.clone());
         sender_client = Some(wss_provider.clone());
@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         let http_provider = Arc::new(DynProvider::<AnyNetwork>::new(
             ProviderBuilder::new()
                 .network::<AnyNetwork>()
-                .on_client(http_client)
+                .connect_client(http_client)
         ));
         // prefer http provider for sending txs
         sender_client = Some(http_provider.clone());

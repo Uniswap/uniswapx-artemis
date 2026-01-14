@@ -21,7 +21,7 @@ use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
-use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
+use bindings_uniswapx::base_reactor::BaseReactor::SignedOrder;
 
 use std::str::FromStr;
 use std::{
@@ -214,7 +214,7 @@ impl UniswapXDutchV3Fill {
                     // Must be able to cover min gas cost
                     let sender_address = self.sender_address.parse::<Address>().unwrap();
                     req.set_from(sender_address);
-                    let gas_usage = self.client.estimate_gas(&req).await.map_or_else(
+                    let gas_usage = self.client.estimate_gas(req.clone()).await.map_or_else(
                         |err| {
                             info!("Error estimating gas: {}", err);
                             if err.to_string().contains("execution reverted") {

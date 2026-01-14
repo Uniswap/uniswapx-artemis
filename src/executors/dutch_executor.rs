@@ -127,7 +127,7 @@ impl Executor<SubmitTxToMempool> for DutchExecutor {
         action.tx.set_nonce(nonce);
         action.tx.set_gas_limit(GAS_LIMIT);
 
-        let gas_usage_result = self.client.estimate_gas(&action.tx).await.or_else(|err| {
+        let gas_usage_result = self.client.estimate_gas(action.tx.clone()).await.or_else(|err| {
             if let Some(raw) = &err.as_error_resp().unwrap().data {
                 if let Ok(serde_value) = serde_json::from_str::<serde_json::Value>(raw.get()) {
                     if let serde_json::Value::String(four_byte) = serde_value {
