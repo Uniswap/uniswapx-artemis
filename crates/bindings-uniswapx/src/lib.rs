@@ -104,4 +104,5 @@ pub mod r#v2dutchorderlib;
 pub mod r#v2dutchorderreactor;
 pub mod r#v3dutchorderlib;
 pub mod r#v3dutchorderreactor;
+pub mod r#v4_universal_router_executor;
 pub mod r#weth;
