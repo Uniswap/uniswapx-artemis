@@ -39,3 +39,7 @@ dashmap = "6.1.0"
 rand = "0.8.5"
 ethabi = "18.0.0"
 backoff = "0.4.0"
+
+[dev-dependencies]
+alloy-node-bindings = "1.4"
+wiremock = "0.6"
