@@ -68,7 +68,7 @@ pub async fn get_revert_reason(
     
     // Simulate the transaction at the block right before it was mined
     let result = provider
-        .call(&tx)
+        .call(tx)
         .block(BlockId::Number(block_number.into()))
         .await;
 

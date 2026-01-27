@@ -231,8 +231,8 @@ pub enum OrderResolution {
 }
 
 impl V2DutchOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
-        Ok(V2DutchOrder::abi_decode(order_hex, validate)?)
+    pub fn decode_inner(order_hex: &[u8], _validate: bool) -> Result<Self, Box<dyn Error>> {
+        Ok(V2DutchOrder::abi_decode(order_hex)?)
     }
 
     pub fn encode_inner(&self) -> Vec<u8> {
@@ -302,8 +302,8 @@ pub fn projected_target_block_ms(current_block: u64, target_block: u64, block_ti
 }
 
 impl PriorityOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
-        Ok(PriorityOrder::abi_decode(order_hex, validate)?)
+    pub fn decode_inner(order_hex: &[u8], _validate: bool) -> Result<Self, Box<dyn Error>> {
+        Ok(PriorityOrder::abi_decode(order_hex)?)
     }
 
     pub fn encode_inner(&self) -> Vec<u8> {
@@ -367,8 +367,8 @@ impl PriorityOutput {
 }
 
 impl V3DutchOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
-        Ok(V3DutchOrder::abi_decode(order_hex, validate)?)
+    pub fn decode_inner(order_hex: &[u8], _validate: bool) -> Result<Self, Box<dyn Error>> {
+        Ok(V3DutchOrder::abi_decode(order_hex)?)
     }
 
     pub fn encode_inner(&self) -> Vec<u8> {

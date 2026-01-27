@@ -24,7 +24,7 @@ use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
 use aws_sdk_cloudwatch::Client as CloudWatchClient;
-use bindings_uniswapx::basereactor::BaseReactor::SignedOrder;
+use bindings_uniswapx::base_reactor::BaseReactor::SignedOrder;
 use std::error::Error;
 use std::str::FromStr;
 use std::sync::Arc;
