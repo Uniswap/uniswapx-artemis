@@ -24,8 +24,8 @@ crossbeam = "0.8.2"
 crossbeam-channel = "0.5.8"
 tokio-stream = "0.1.14"
 reqwest = { version = "0.11.18", features = ["json"] }
-alloy = "1.4"
-alloy-primitives = "1"
+alloy = "1.5.2"
+alloy-primitives = "1.5.2"
 serde_qs = "0.12.0"
 async-stream = "0.3.5"
 mockito = "1.1.0"
@@ -41,5 +41,5 @@ ethabi = "18.0.0"
 backoff = "0.4.0"
 
 [dev-dependencies]
-alloy-node-bindings = "1.4"
+alloy-node-bindings = "1.5.2"
 wiremock = "0.6"
