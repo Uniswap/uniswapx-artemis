@@ -10,6 +10,8 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
+      - name: Security scanning
+        uses: bullfrogsec/bullfrog@v0.8.4
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: foundry-rs/foundry-toolchain@v1
