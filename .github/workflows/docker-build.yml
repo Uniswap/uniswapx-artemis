@@ -1,0 +1,19 @@
+name: docker build
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  docker_build:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Security scanning
+        uses: bullfrogsec/bullfrog@1831f79cce8ad602eef14d2163873f27081ebfb3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build --platform=linux/amd64 -t uniswapx-artemis .
