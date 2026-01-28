@@ -41,9 +41,17 @@ use uniswapx_rs::order::{Order, OrderResolution, HybridOrder};
 use super::{priority_strategy::ExecutionMetadata, types::{Action, Event}};
 
 const DONE_EXPIRY: u64 = 300;
-// Base addresses
-const REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
+
+/// Get the Hybrid Reactor address for a given chain ID
+fn get_reactor_address(chain_id: u64) -> &'static str {
+    match chain_id {
+        1301 => "0x000000000C75276D956cc35218ca8f132D877957", // Unichain Sepolia
+        8453 => "0x000000001Ec5656dcdB24D90DFa42742738De729", // Base
+        130 => "0x000000001Ec5656dcdB24D90DFa42742738De729",  // Unichain Mainnet
+        _ => panic!("Unsupported chain for Hybrid orders: {}", chain_id),
+    }
+}
 
 /// Strategy for filling UniswapX Hybrid Orders
 /// 
@@ -417,7 +425,7 @@ impl UniswapXHybridFill {
     }
 
     async fn handle_fills(&self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = get_reactor_address(self.chain_id).parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(*self.last_block_number.read().await)
             .address(reactor_address)
