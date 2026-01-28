@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-alloy = { version = "0.11.1", features = ["sol-types", "contract"] }
+alloy = { version = "1.5.2", features = ["sol-types", "contract"] }
+serde = "1"

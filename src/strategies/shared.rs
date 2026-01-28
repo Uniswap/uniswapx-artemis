@@ -15,8 +15,8 @@ use alloy_primitives::Bytes;
 use anyhow::Result;
 use async_trait::async_trait;
 use bindings_uniswapx::{
-    basereactor::BaseReactor::SignedOrder, erc20::ERC20,
-    universalrouterexecutor::UniversalRouterExecutor,
+    base_reactor::BaseReactor::SignedOrder, erc20::ERC20,
+    universal_router_executor::UniversalRouterExecutor,
 };
 use ethabi::{ethereum_types::H160, Token};
 use std::{
@@ -116,7 +116,7 @@ pub trait UniswapXStrategy {
             .call()
             .await
             .expect("Failed to get allowance");
-        if allowance._0 < U256::MAX / U256::from(2) {
+        if allowance < U256::MAX / U256::from(2) {
             Ok(vec![Token::Address(H160(token.0 .0))])
         } else {
             Ok(vec![])
@@ -192,7 +192,7 @@ pub trait UniswapXStrategy {
     ) -> Result<U256> {
         let precompile_address = ARBITRUM_GAS_PRECOMPILE.parse::<Address>()?;
         let gas_precompile = GasPrecompileContract::new(precompile_address, client.clone());
-        let gas_info = gas_precompile.getMinimumGasPrice().call().await?._0;
+        let gas_info = gas_precompile.getMinimumGasPrice().call().await?;
 
         Ok(gas_info)
     }
