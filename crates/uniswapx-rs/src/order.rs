@@ -570,8 +570,8 @@ impl PriceCurveElement {
 }
 
 impl HybridOrder {
-    pub fn decode_inner(order_hex: &[u8], validate: bool) -> Result<Self, Box<dyn Error>> {
-        Ok(HybridOrder::abi_decode(order_hex, validate)?)
+    pub fn decode_inner(order_hex: &[u8], _validate: bool) -> Result<Self, Box<dyn Error>> {
+        Ok(HybridOrder::abi_decode(order_hex)?)
     }
 
     pub fn encode_inner(&self) -> Vec<u8> {
