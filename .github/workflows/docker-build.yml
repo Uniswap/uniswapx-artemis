@@ -5,6 +5,8 @@ on:
       - main
   pull_request:
 
+permissions: {}
+
 jobs:
   docker_build:
     name: docker build
@@ -15,5 +17,7 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Build Docker image
         run: docker build --platform=linux/amd64 -t uniswapx-artemis .
