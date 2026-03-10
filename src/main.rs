@@ -23,6 +23,7 @@ use executors::queued_executor::QueuedExecutor;
 use std::collections::HashMap;
 use std::sync::Arc;
 use strategies::dutchv3_strategy::UniswapXDutchV3Fill;
+use strategies::hybrid_strategy::UniswapXHybridFill;
 use strategies::keystore::KeyStore;
 use strategies::priority_strategy::UniswapXPriorityFill;
 use strategies::{
@@ -314,6 +315,18 @@ async fn main() -> Result<()> {
             );
 
             engine.add_strategy(Box::new(priority_strategy));
+        }
+        OrderType::Hybrid => {
+            let hybrid_strategy = UniswapXHybridFill::new(
+                client.clone().unwrap(),
+                cloudwatch_client.clone(),
+                config.clone(),
+                batch_sender,
+                route_receiver,
+                chain_id,
+            );
+
+            engine.add_strategy(Box::new(hybrid_strategy));
         }
     }
 

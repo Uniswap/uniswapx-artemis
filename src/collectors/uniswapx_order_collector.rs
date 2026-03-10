@@ -38,6 +38,7 @@ pub enum OrderType {
     DutchV3,
     #[default]
     Priority,
+    Hybrid,
 }
 
 impl FromStr for OrderType {
@@ -48,6 +49,7 @@ impl FromStr for OrderType {
             "Dutch_V2" => Ok(OrderType::DutchV2),
             "Dutch_V3" => Ok(OrderType::DutchV3),
             "Priority" => Ok(OrderType::Priority),
+            "Hybrid" => Ok(OrderType::Hybrid),
             _ => Err(OrderTypeError::InvalidOrderType),
         }
     }
@@ -59,6 +61,7 @@ impl fmt::Display for OrderType {
             OrderType::DutchV2 => write!(f, "Dutch_V2"),
             OrderType::DutchV3 => write!(f, "Dutch_V3"),
             OrderType::Priority => write!(f, "Priority"),
+            OrderType::Hybrid => write!(f, "Hybrid"),
         }
     }
 }
@@ -274,7 +277,7 @@ mod tests {
     use futures::StreamExt;
     use mockito::{Mock, Server, ServerGuard};
     use uniswapx_rs::order::{
-        V2DutchOrder, V3DutchOrder,
+        V2DutchOrder, V3DutchOrder, HybridOrder,
     };
 
     use super::OrderType;
@@ -387,6 +390,49 @@ mod tests {
         match result {
             Err(e) => panic!("Error decoding order: {:?}", e),
             _ => (),
+        }
+    }
+
+    #[tokio::test]
+    async fn decodes_hybrid_order() {
+        // Encoded HybridOrder generated from create_test_hybrid_order with:
+        // - input: 1 ether, output: 0.95 ether
+        // - scalingFactor: 1e18 (neutral)
+        // - priceCurve: [(10 blocks, 1.1e18)]
+        // - auctionStartBlock: 100
+        // Correct encoded HybridOrder generated from create_test_hybrid_order in uniswapx-rs
+        let encoded_order = "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000160000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000240000000000000000000000000000000000000000000000000000000000000006400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000002c000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000360000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d2f13f7789f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000a000000000000000000000000000000000000000000000f43fc2c04ee00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+        let response = format!(
+            r#"{{"orders":[{{"type":"Hybrid","orderStatus":"open","signature":"0x641f95404ebd14ba5216133f6b2207227ac20d1b0ed986d73cc4055761d5ab504ec2b3a597e5a946a1b9e685134bd08eae66e5a9c515c996833c96362e12c0e21c","encodedOrder":"{}","chainId":1301,"orderHash":"0xabc123def456789","swapper":"0x2b813964306D8F12bdaB5504073a52e5802f049D","createdAt":1721424286}}]}}"#,
+            encoded_order
+        );
+
+        let (collector, _server, _) = get_collector(&response, OrderType::Hybrid).await;
+        // get event stream and parse events
+        let stream = collector.get_event_stream().await.unwrap();
+        let (first_order, _) = stream.into_future().await;
+        assert!(first_order.is_some());
+        assert_eq!(
+            first_order.clone().unwrap().order_hash,
+            "0xabc123def456789"
+        );
+        let encoded_order = &first_order.unwrap().encoded_order;
+        let encoded_order = if encoded_order.starts_with("0x") {
+            &encoded_order[2..]
+        } else {
+            encoded_order
+        };
+        let order_hex: Vec<u8> = hex::decode(encoded_order).unwrap();
+
+        let result = HybridOrder::decode_inner(&order_hex, false);
+        match result {
+            Ok(order) => {
+                // Verify the order fields
+                assert_eq!(order.auctionStartBlock, alloy::primitives::U256::from(100));
+                assert_eq!(order.priceCurve.len(), 1);
+            }
+            Err(e) => panic!("Error decoding Hybrid order: {:?}", e),
         }
     }
 }

@@ -36,120 +36,24 @@ use tokio::sync::{
     RwLock,
 };
 use tracing::{debug, error, info, warn};
-use uniswapx_rs::order::{Order, OrderResolution, PriorityOrder, BPS, MPS};
+use uniswapx_rs::order::{Order, OrderResolution, HybridOrder};
 
-use super::types::{Action, Event};
+use super::{priority_strategy::ExecutionMetadata, types::{Action, Event}};
 
 const DONE_EXPIRY: u64 = 300;
-// Base addresses
-const REACTOR_ADDRESS: &str = "0x000000001Ec5656dcdB24D90DFa42742738De729";
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
 
-fn get_block_time_ms(chain_id: u64) -> u64 {
+/// Get the Hybrid Reactor address for a given chain ID
+fn get_reactor_address(chain_id: u64) -> &'static str {
     match chain_id {
-        130 => 1000,   // Unichain
-        8453 => 2000,  // Base Mainnet
-        _ => 2000,     // Default to 2 seconds for unknown chains
+        1301 => "0x000000000C75276D956cc35218ca8f132D877957", // Unichain Sepolia
+        8453 => "0x000000001Ec5656dcdB24D90DFa42742738De729", // Base
+        130 => "0x000000001Ec5656dcdB24D90DFa42742738De729",  // Unichain Mainnet
+        _ => panic!("Unsupported chain for Hybrid orders: {}", chain_id),
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ExecutionMetadata {
-    // amount of quote token we can get
-    pub quote: U256,
-    pub quote_eth: Option<U256>,
-    // whether the order is an exact output order
-    pub exact_output: bool,
-    // amount of quote token needed to fill the order
-    pub amount_required: U256,
-    pub gas_use_estimate_quote: U256,
-    pub order_hash: String,
-    pub target_block: Option<U64>,
-    pub fallback_bid_scale_factor: Option<u64>,
-}
-
-impl ExecutionMetadata {
-    pub fn new(
-        quote: U256,
-        quote_eth: Option<U256>,
-        exact_output: bool,
-        amount_required: U256,
-        gas_use_estimate_quote: U256,
-        order_hash: &str,
-        target_block: Option<U64>,
-        fallback_bid_scale_factor: Option<u64>,
-    ) -> Self {
-        Self {
-            quote,
-            quote_eth,
-            exact_output,
-            amount_required,
-            gas_use_estimate_quote,
-            order_hash: order_hash.to_owned(),
-            target_block,
-            fallback_bid_scale_factor,
-        }
-    }
-
-    pub fn calculate_priority_fee(&self, bid_bps: U128) -> Option<U256> {
-        // exact_out: quote must be less than amount_in_required
-        // exact_in: quote must be greater than amount_out_required
-        if (self.exact_output && self.quote.ge(&self.amount_required)) ||
-           (!self.exact_output && self.quote.le(&self.amount_required)) {
-            info!("{} - quote is not less than amount_required, skipping", self.order_hash);
-            return None;
-        }
-
-        // exact_out: profit = amount_in_required - quote
-        // exact_in: profit = quote - amount_out_required
-        let profit_quote = if self.exact_output {
-            self.amount_required.saturating_sub(self.quote)
-        } else {
-            self.quote.saturating_sub(self.amount_required)
-        };
-
-        let mps_of_improvement = profit_quote
-            .saturating_mul(U256::from(MPS))
-            .checked_div(self.amount_required)?;
-        let priority_fee = mps_of_improvement
-            .checked_mul(U256::from(bid_bps))?
-            .checked_div(U256::from(BPS))?;
-        Some(priority_fee)
-    }
-
-    // Uses the gas_use_estimate_quote to calculate the maximum priority fee we can bid
-    // @param gas_buffer: The buffer to multiply the gas use estimate by
-    pub fn calculate_priority_fee_from_gas_use_estimate(&self, gas_buffer: U256) -> Option<U256> {
-        let gas_with_buffer = U256::from(self.gas_use_estimate_quote).checked_mul(gas_buffer)?;
-
-        // exact_out: quote must be less than amount_in_required - gas_with_buffer
-        // exact_in: quote must be greater than amount_out_required + gas_with_buffer
-        if (self.exact_output && self.quote.ge(&self.amount_required.checked_sub(gas_with_buffer)?)) ||
-           (!self.exact_output && self.quote.le(&self.amount_required.checked_add(gas_with_buffer)?)) {
-            return None;
-        }
-
-        // exact_out: profit = amount_in_required - gas - quote
-        // exact_in: profit = quote - gas - amount_out_required
-        let profit_quote = if self.exact_output {
-            self.amount_required
-                .saturating_sub(gas_with_buffer)
-                .saturating_sub(self.quote)
-        } else {
-            self.quote
-                .saturating_sub(gas_with_buffer)
-                .saturating_sub(self.amount_required)
-        };
-
-        let mps_of_improvement = profit_quote
-            .saturating_mul(U256::from(MPS))
-            .checked_div(self.amount_required)?;
-
-        Some(mps_of_improvement)
-    }
-}
-
-/// Strategy for filling UniswapX Priority Orders
+/// Strategy for filling UniswapX Hybrid Orders
 /// 
 /// This strategy:
 /// - Tracks new orders from the UniswapX API
@@ -159,7 +63,7 @@ impl ExecutionMetadata {
 /// - Prunes completed orders periodically
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct UniswapXPriorityFill {
+pub struct UniswapXHybridFill {
     /// Alloy DynProvider client.
     client: Arc<DynProvider<AnyNetwork>>,
     // AWS Cloudwatch CLient for metrics propagation
@@ -181,7 +85,7 @@ pub struct UniswapXPriorityFill {
     chain_id: u64,
 }
 
-impl UniswapXPriorityFill {
+impl UniswapXHybridFill {
     pub fn new(
         client: Arc<DynProvider<AnyNetwork>>,
         cloudwatch_client: Option<Arc<CloudWatchClient>>,
@@ -211,7 +115,7 @@ impl UniswapXPriorityFill {
 }
 
 #[async_trait]
-impl Strategy<Event, Action> for UniswapXPriorityFill {
+impl Strategy<Event, Action> for UniswapXHybridFill {
     async fn sync_state(&mut self) -> Result<()> {
         info!("syncing state");
 
@@ -228,9 +132,9 @@ impl Strategy<Event, Action> for UniswapXPriorityFill {
     }
 }
 
-impl UniswapXStrategy for UniswapXPriorityFill {}
+impl UniswapXStrategy for UniswapXHybridFill {}
 
-impl UniswapXPriorityFill {
+impl UniswapXHybridFill {
     pub fn get_new_order(&self, hash: &str) -> Option<OrderData> {
         self.new_orders.get(hash).map(|entry| entry.value().clone())
     }
@@ -244,7 +148,21 @@ impl UniswapXPriorityFill {
         }
     }
 
-    fn decode_order(&self, encoded_order: &str) -> Result<PriorityOrder, Box<dyn Error>> {
+    fn get_auction_target_block(&self, order: &HybridOrder) -> Option<U256> {
+        let target_block = if order.cosignerData.auctionTargetBlock > U256::ZERO {
+            order.cosignerData.auctionTargetBlock
+        } else {
+            order.auctionStartBlock
+        };
+
+        if target_block == U256::ZERO {
+            None
+        } else {
+            Some(target_block)
+        }
+    }
+
+    fn decode_order(&self, encoded_order: &str) -> Result<HybridOrder, Box<dyn Error>> {
         let encoded_order = if let Some(stripped) = encoded_order.strip_prefix("0x") {
             stripped
         } else {
@@ -254,17 +172,15 @@ impl UniswapXPriorityFill {
         let order_hex = hex::decode(encoded_order)
             .map_err(|e| format!("Failed to decode hex: {}", e))?;
 
-        PriorityOrder::decode_inner(&order_hex, false)
+        HybridOrder::decode_inner(&order_hex, false)
             .map_err(|e| format!("Failed to decode order: {}", e).into())
     }
 
-    async fn get_order_status(&self, order: &PriorityOrder) -> OrderStatus {
+    async fn get_order_status(&self, order: &HybridOrder) -> OrderStatus {
         let resolved_order = order.resolve(
             *self.last_block_number.read().await,
             *self.last_block_timestamp.read().await,
-            get_block_time_ms(self.chain_id),
-            Uint::from(0),
-            self.min_block_percentage_buffer.unwrap_or(100)
+            U256::ZERO,
         );
         let order_status = match resolved_order {
             OrderResolution::Expired | OrderResolution::Invalid | OrderResolution::InvalidTargetBlockDesignation => OrderStatus::Done,
@@ -319,7 +235,7 @@ impl UniswapXPriorityFill {
                     return self.check_orders_for_submission().await;
                 }
                 let order_data = OrderData {
-                    order: Order::PriorityOrder(order.clone()),
+                    order: Order::HybridOrder(order.clone()),
                     hash: order_hash.clone(),
                     signature: event.signature.clone(),
                     resolved,
@@ -355,7 +271,8 @@ impl UniswapXPriorityFill {
                     "{} - Route new order at block {}; target: {}",
                     order_hash,
                     *self.last_block_number.read().await,
-                    order.cosignerData.auctionTargetBlock
+                    self.get_auction_target_block(&order)
+                        .unwrap_or(U256::ZERO)
                 );
                 let order_batch = self.get_order_batch(&order_data);
                 self.try_route_order_batch(order_batch, order_hash)
@@ -395,7 +312,7 @@ impl UniswapXPriorityFill {
 
                 // Check if order is fillable
                 let resolved_order = match &entry.order {
-                    Order::PriorityOrder(order) => order,
+                    Order::HybridOrder(order) => order,
                     _ => continue,
                 };
 
@@ -473,7 +390,7 @@ impl UniswapXPriorityFill {
         let mut signed_orders: Vec<SignedOrder> = Vec::new();
         for batch in orders.iter() {
             match &batch.order {
-                Order::PriorityOrder(order) => {
+                Order::HybridOrder(order) => {
                     signed_orders.push(SignedOrder {
                         order: Bytes::from(order.encode_inner()),
                         sig: Bytes::from_str(&batch.signature)?,
@@ -508,7 +425,7 @@ impl UniswapXPriorityFill {
     }
 
     async fn handle_fills(&self) -> Result<()> {
-        let reactor_address = REACTOR_ADDRESS.parse::<Address>().unwrap();
+        let reactor_address = get_reactor_address(self.chain_id).parse::<Address>().unwrap();
         let filter = Filter::new()
             .select(*self.last_block_number.read().await)
             .address(reactor_address)
@@ -535,7 +452,7 @@ impl UniswapXPriorityFill {
         Ok(())
     }
 
-    /// The profit of a priority order is calculated a bit differently
+    /// The profit of a hybrid order is calculated a bit differently
     /// Rationale:
     ///     - we will always bid the base fee
     ///     - since we have to provide 1 MP (1/1000th of a bp) for every wei of priority fee
@@ -568,7 +485,7 @@ impl UniswapXPriorityFill {
     /// if order is open, send for execution
     async fn process_new_order(
         &mut self,
-        order: PriorityOrder,
+        order: HybridOrder,
         order_hash: String,
         signature: &str,
         route: Option<RouteInfo>,
@@ -585,7 +502,7 @@ impl UniswapXPriorityFill {
             }
             OrderStatus::NotFillableYet(resolved_order) | OrderStatus::Open(resolved_order) => {
                 let order_data = OrderData {
-                    order: Order::PriorityOrder(order),
+                    order: Order::HybridOrder(order),
                     hash: order_hash.to_string(),
                     signature: signature.to_string(),
                     resolved: resolved_order,
@@ -630,7 +547,7 @@ impl UniswapXPriorityFill {
         for order_hash in order_hashes {
             if let Some(order_data) = self.get_new_order(&order_hash) {
                 match &order_data.order {
-                    Order::PriorityOrder(order) => {
+                    Order::HybridOrder(order) => {
                         if let Err(e) = self
                             .process_new_order(
                                 order.clone(),
@@ -693,7 +610,7 @@ impl UniswapXPriorityFill {
 
                 // Check if order is now fillable
                 let order = match &order_data.order {
-                    Order::PriorityOrder(order) => order,
+                    Order::HybridOrder(order) => order,
                     _ => continue,
                 };
 
@@ -745,7 +662,7 @@ impl UniswapXPriorityFill {
                                 route: vec![],
                                 method_parameters: order_data.route.as_ref().unwrap().method_parameters.clone(),
                             },
-                            target_block: Some(order.cosignerData.auctionTargetBlock),
+                            target_block: self.get_auction_target_block(order),
                         };
 
                         info!(
